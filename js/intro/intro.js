@@ -68,19 +68,27 @@ const isAbort = (e) => e && e.name === 'AbortError';
 function awaitSubmit(form, input, signal) {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(abortError());
-    const onSubmit = (e) => {
-      e.preventDefault();
+    const finish = () => {
       const val = input.value.trim();
       if (!val) { input.focus(); return; } // ignore empty, keep waiting
       cleanup();
       resolve(val);
     };
+    const onSubmit = (e) => { e.preventDefault(); finish(); };
+    // A form with two inputs (username + password) and NO submit button does
+    // NOT implicitly submit on Enter — so the native 'submit' never fires on the
+    // password step and Enter appears dead. Catch Enter on the input directly.
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(); }
+    };
     const onAbort = () => { cleanup(); reject(abortError()); };
     const cleanup = () => {
       form.removeEventListener('submit', onSubmit);
+      input.removeEventListener('keydown', onKey);
       signal.removeEventListener('abort', onAbort);
     };
     form.addEventListener('submit', onSubmit);
+    input.addEventListener('keydown', onKey);
     signal.addEventListener('abort', onAbort, { once: true });
   });
 }

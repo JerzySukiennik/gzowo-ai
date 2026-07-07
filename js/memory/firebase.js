@@ -423,8 +423,15 @@ export async function init() {
   const CONFIG = window.GZOWO_CONFIG || {};
   const fb = CONFIG.firebase;
 
-  // ---- DEMO MODE (placeholder config) --------------------------------------
-  if (!isConfigValid(fb)) {
+  // Force demo without touching the real config: append ?demo=1 to the URL
+  // (or set CONFIG.forceDemo=true). Lets you into the app with ANY login while
+  // real Firebase auth stays the default. Handy for a quick look / when a
+  // password is being sorted out.
+  let forceDemo = CONFIG.forceDemo === true;
+  try { forceDemo = forceDemo || new URLSearchParams(location.search).has('demo'); } catch { /* no location */ }
+
+  // ---- DEMO MODE (placeholder config OR forced) ----------------------------
+  if (forceDemo || !isConfigValid(fb)) {
     _demo = true;
     console.warn(
       '[memory] DEMO MODE — Firebase config is placeholder. Persistence via localStorage only; nic nie leci do chmury.'
