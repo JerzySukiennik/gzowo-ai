@@ -85,13 +85,13 @@ function buildTopBar() {
   el.bridge = bridge;
 
   // Wake toggle (click toggles state.wakeEnabled). Gated on real capability:
-  // when Porcupine is unconfigured (no accessKey/.ppn) the toggle must NOT flip
-  // to a lying "WAKE ON" — there is no worker or mic subscription behind it.
+  // wakeAvailable flips true only once the Vosk wake-word model has loaded (served
+  // by the bridge). Until then the toggle must NOT flip to a lying "WAKE ON".
   const wake = h('button', 'hud-ind hud-wake', { type: 'button', title: 'Nasłuch słowa-klucza' });
   wake.addEventListener('click', () => {
     if (!state.get('wakeAvailable')) {
       bus.emit('toast', {
-        text: 'Nasłuch niedostępny — brak Porcupine (accessKey/.ppn), człowieku.',
+        text: 'Nasłuch jeszcze niedostępny — model „Hej Gzowo" się ładuje albo nie ma mostu. Daj chwilę / odśwież na localhost:8787, człowieku.',
         kind: 'warn'
       });
       return;
