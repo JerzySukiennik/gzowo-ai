@@ -1,5 +1,6 @@
-/* css/base.css — reset + root chrome layers (scaffold-owned). B&W only here; no color.
-   Positions every fixed layer per the z-index map from design-tokens.css. */
+/* css/base.css — v2 reset + root chrome layers (foundation-owned). B&W only here; no color.
+   Positions every fixed layer per the v2 z-index map from design-tokens.css and ships the
+   ONE reusable liquid-glass recipe (.glass) that every glass surface in the app reuses. */
 
 /* ---- Reset ---- */
 *, *::before, *::after { box-sizing: border-box; }
@@ -25,7 +26,7 @@ html, body {
 
 /* ---- Background grid (z:0) ---- */
 /* Two 1px repeating-linear-gradients draw the line grid; a radial vignette
-   darkens the edges so the orb reads brighter in the center. */
+   darkens the edges so the avatar reads brighter in the center. */
 #grid-bg {
   position: fixed;
   inset: 0;
@@ -38,11 +39,11 @@ html, body {
   background-position: center center;
 }
 
-/* ---- Orb canvas (z:10) — fullscreen, never eats pointer events ---- */
-#orb-canvas {
+/* ---- Avatar canvas (z:10) — fullscreen 2D canvas, never eats pointer events ---- */
+#avatar-canvas {
   position: fixed;
   inset: 0;
-  z-index: var(--z-orb);
+  z-index: var(--z-avatar);
   pointer-events: none;
   display: block;
 }
@@ -57,46 +58,91 @@ html, body {
 }
 #widget-layer .widget { pointer-events: auto; }
 
-/* ---- HUD (z:30) ---- */
-#hud-top {
+/* ---- Chat bubble (z:25) — floating glass bubble beside the avatar ---- */
+/* chat.js positions it purely via transform; foundation only fixes position + z. */
+#chat-bubble {
   position: fixed;
-  top: 0; left: 0; right: 0;
-  height: var(--hud-h);
-  z-index: var(--z-hud);
+  top: 0;
+  left: 0;
+  z-index: var(--z-bubble);
 }
-#dock {
+#chat-bubble[hidden] { display: none; }
+
+/* ---- Islands (z:30) — two levitating pills, bottom-center ---- */
+/* Bar is click-through; each pill re-enables pointer-events. */
+#islands {
   position: fixed;
-  bottom: 0; left: 0; right: 0;
-  height: var(--dock-h);
-  z-index: var(--z-hud);
+  left: 0;
+  right: 0;
+  bottom: var(--islands-bottom);
+  display: flex;
+  justify-content: center;
+  gap: var(--islands-gap);
+  z-index: var(--z-islands);
+  pointer-events: none;
+}
+#islands > * { pointer-events: auto; }
+
+/* ---- Trash corner (z:32) — pop-up disc, bottom-right, on throw only ---- */
+#trash-corner {
+  position: fixed;
+  right: var(--trash-margin);
+  bottom: var(--trash-margin);
+  width: var(--trash-size);
+  height: var(--trash-size);
+  z-index: var(--z-trash);
+  pointer-events: none;
 }
 
-/* ---- Chat panel (z:35) ---- */
-#chat-panel {
+/* ---- Settings layer (z:60) — centered glass card, voice-only entry ---- */
+#settings-layer {
   position: fixed;
-  top: 0; right: 0; bottom: 0;
-  width: var(--chat-w);
-  z-index: var(--z-chat);
+  inset: 0;
+  z-index: var(--z-settings);
 }
-#chat-panel[hidden] { display: none; }
+#settings-layer[hidden] { display: none; }
 
-/* ---- Toast layer (z:50) ---- */
+/* ---- Toast layer (z:70) — sits above the islands clearance ---- */
 #toast-layer {
   position: fixed;
-  bottom: var(--dock-h);
-  left: 0; right: 0;
+  bottom: var(--islands-clearance);
+  left: 0;
+  right: 0;
   z-index: var(--z-toast);
   pointer-events: none;
 }
 
-/* ---- Intro layer (z:100) — covers everything until intro:done ---- */
-#intro-layer {
+/* ---- Auth layer (z:100) — full-screen gate until login/session restore ---- */
+#auth-layer {
   position: fixed;
   inset: 0;
-  z-index: var(--z-intro);
+  z-index: var(--z-auth);
   background: var(--bg);
 }
-#intro-layer[hidden] { display: none; }
+#auth-layer[hidden] { display: none; }
+
+/* ============================================================================
+   Liquid-glass recipe — THE single glass surface. Islands, TRYBY panel, chat
+   bubble, settings card, auth card and the trash disc all just add class="glass".
+   ============================================================================ */
+.glass {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--glass-radius);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.15);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.15);
+  position: relative;
+  overflow: hidden;
+}
+.glass::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--glass-highlight);
+  pointer-events: none;
+}
 
 /* ---- Scrollbars — thin, monochrome ---- */
 * {

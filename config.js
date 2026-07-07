@@ -1,12 +1,15 @@
 // config.js — Gzowo runtime config (loaded into window.GZOWO_CONFIG).
 // ⚠️ PUBLIC-SAFE ONLY — this file IS committed to the public repo.
-// Firebase web keys are public by design (secured by Firestore rules + Auth
-// authorized-domains), so they are fine here. The Gemini API key is a REAL
-// secret and must NEVER live in this file — it stays only in bridge/.env
-// (local) and the Cloudflare Worker secret (deployed). Keep apiKeyDirect = ''.
+// Firebase web keys are public by design (secured by Firestore rules), so they are
+// fine here. The Gemini API key is a REAL secret and must NEVER live in this file —
+// it stays only in bridge/.env (local) and the Cloudflare Worker secret (deployed).
+// Keep apiKeyDirect = ''.
+//
+// v2: no Firebase Auth, no demo mode. Login is a custom Firestore-backed auth
+// (users/{username} with salt+hash) — see js/auth/custom-auth.js.
 
 export const CONFIG = {
-  // --- Firebase (auth + cross-device memory) — public-safe web config ---
+  // --- Firebase (cross-device memory + custom Firestore auth) — public-safe web config ---
   firebase: {
     apiKey: 'AIzaSyCqlWNyOUqHgIxQ4Wb7jNWIcNDuLrzKqwU',
     authDomain: 'gzowo-ai.firebaseapp.com',
@@ -16,14 +19,6 @@ export const CONFIG = {
     appId: '1:717017060506:web:775c59f063d43567b1fb23'
   },
 
-  // --- Login convenience: type just "jurek", app appends this domain -> jurek@gzowo.ai ---
-  // Your Firebase user must be created with the SAME email (e.g. jurek@gzowo.ai).
-  auth: { emailDomain: 'gzowo.ai' },
-
-  // --- Login REMOVED: boot straight into the interface; memory stays local ---
-  skipLogin: true,
-  forceDemo: true,
-
   // --- Gemini (brain + voice, Live native audio) ---
   gemini: {
     model: 'gemini-2.5-flash-native-audio-latest',
@@ -32,7 +27,6 @@ export const CONFIG = {
   },
 
   // --- Wake word "Hej Gzowo" via Vosk (free, offline, no account) ---
-  // Porcupine's free tier ended 2026-06-30, so we use Vosk keyword-spotting.
   // The ~53MB Polish model is served locally by the bridge (models/vosk-pl.tar.gz);
   // with no bridge (deployed) it's unreachable -> honest WAKE OFF.
   vosk: {
@@ -40,7 +34,7 @@ export const CONFIG = {
     keywords: ['hej gzowo', 'ok gzowo', 'gzowo']
   },
 
-  // --- Bridge (local Node on Mac: projects, whisper, token minting) ---
+  // --- Bridge (local Node on Mac: projects, whisper, HA proxy, fetch, token minting) ---
   // On your phone at home, swap for the Mac's LAN IP (e.g. http://192.168.1.20:8787).
   bridge: { url: 'http://localhost:8787' },
 

@@ -1,0 +1,44 @@
+/* css/trash.css — the pop-up KOSZ disc (bottom-right, on throw only).
+   STRICT B&W: only tokens from design-tokens.css. #trash-corner is positioned +
+   sized + z-layered by base.css; this sheet only styles the animated inner disc.
+
+   The disc is an ANIMATION TARGET, never a button: it is pointer-events:none at
+   all times and rests INVISIBLE. js/ui/trash.js drives it via the Web Animations
+   API (transform + opacity only) on 'trash:throw'/'trash:done'. The resting
+   values below are the same frame the JS animates from, so it starts hidden. */
+
+.trash-disc {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* .glass gives the liquid-glass surface; override its pill radius for a disc. */
+  border-radius: 50%;
+  color: var(--fg);
+  pointer-events: none;
+  /* Rest: invisible, shrunk and nudged down (the pop-in springs up from here). */
+  opacity: 0;
+  transform: translateY(16px) scale(0.5);
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+
+/* .glass::before highlight inherits border-radius: inherit -> 50%. Good. */
+
+.trash-disc svg {
+  width: 46%;
+  height: 46%;
+  stroke: var(--fg);
+  fill: none;
+  display: block;
+}
+
+/* Reduced motion: no spring, no scale — rest at final position, JS only fades. */
+@media (prefers-reduced-motion: reduce) {
+  .trash-disc {
+    transform: none;
+  }
+}

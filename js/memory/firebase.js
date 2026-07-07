@@ -1,84 +1,75 @@
-// js/memory/firebase.js — MEMORY module (memory-owned).
-// Auth + cross-device memory for Gzowo. Firestore is the source of truth;
-// localStorage mirrors give an instant boot and an honest offline fallback.
+// js/memory/firebase.js — MEMORY module (memory-owned), v2.
 //
-// Boot flow (per contract):
-//   init() -> if config valid: initializeApp + onAuthStateChanged.
-//     user present  -> state.set('user'), emit 'auth:ready' {user, demo:false},
-//                      load prefs + pinned, APPLY to state, emit 'memory:ready'.
-//     signed out     -> emit 'auth:ready' {user:null, demo:false}.
-//   If config is placeholder -> DEMO MODE: console.warn, state.set('demo',true),
-//     emit 'auth:ready' {user:null, demo:true}; all persistence via localStorage
-//     keys 'gzowo.demo.*'. We NEVER pretend demo data is cloud.
+// Firestore ONLY. There is NO Firebase Auth here anymore — identity is owned by
+// js/auth/custom-auth.js (salted PBKDF2 hashes in users/{username}). This module:
+//   • initializes the Firestore app once (getDb() -> Firestore|null),
+//   • attaches the logged-in user (attachUser) and loads their prefs + facts,
+//   • mirrors everything to localStorage for an instant boot + honest offline,
+//   • persists pref changes (debounced 800ms) and batches transcript writes.
 //
-// Everything degrades honestly: a Firestore read/write that fails is logged,
-// raises ONE 'toast' warn per session, and falls back to the localStorage
-// mirror so the app never blocks.
+// Docs are keyed by USERNAME (lowercase):
+//   users/{username}                 root doc (created + owned by custom-auth)
+//   users/{username}/meta/prefs      {theme,mode,muted,wakeEnabled,skills,pinned}
+//   users/{username}/facts           {text,ts}          (learned facts about Jurek)
+//   users/{username}/transcripts     {role,text,ts}     (batched conversation log)
+//   users/{username}/notes           reserved for skills.js
+//
+// Everything degrades honestly: any Firestore read/write failure is logged, raises
+// ONE 'toast' warn per session, and falls back to the localStorage mirror so the
+// app never blocks. init() never throws; if config is a placeholder or Firestore
+// fails to init, getDb() stays null and the app runs on local mirrors only.
 
 import { bus } from '../core/event-bus.js';
 import { state } from '../core/state-manager.js';
 
-// ---- Firebase modular SDK v10 (CDN, no build) ------------------------------
+// ---- Firebase modular SDK v10 (CDN, no build) — FIRESTORE ONLY -------------
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import {
-  getAuth,
-  signInWithEmailAndPassword,
-  onAuthStateChanged,
-  signOut
-} from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import {
-  getFirestore,
   initializeFirestore,
   doc,
   getDoc,
   setDoc,
-  updateDoc,
   collection,
   addDoc,
   query,
   orderBy,
   limit,
-  getDocs,
-  serverTimestamp
+  getDocs
 } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
 // ============================================================================
 // Constants
 // ============================================================================
 
-// Store keys we own: loaded from prefs, applied to state, and persisted back.
-const PREF_KEYS = ['theme', 'mode', 'muted', 'wakeEnabled'];
-
-// localStorage key namespaces.
-const LS = {
-  demoPrefs: 'gzowo.demo.prefs',        // demo-mode prefs doc mirror
-  demoFacts: 'gzowo.demo.facts',        // demo-mode facts (array of strings)
-  demoTranscript: 'gzowo.demo.transcript', // demo-mode last 50 transcript entries
-  cachePrefs: 'gzowo.cache.prefs',      // cloud prefs mirror (instant boot)
-  cacheFacts: 'gzowo.cache.facts'       // cloud facts mirror
-};
+// Store keys we own: loaded from prefs, applied to state, persisted back.
+// v2 adds 'skills' (array of enabled skill ids).
+const PREF_KEYS = ['theme', 'mode', 'muted', 'wakeEnabled', 'skills'];
 
 const PREF_DEBOUNCE_MS = 800;           // per-key debounce for savePref persistence
 const TRANSCRIPT_FLUSH_MS = 5000;       // max time between transcript flushes
 const TRANSCRIPT_FLUSH_COUNT = 10;      // flush when this many buffered
 const TRANSCRIPT_WRITE_CAP = 200;       // hard cap of Firestore writes / session
-const DEMO_TRANSCRIPT_CAP = 50;         // demo keeps last N locally
+const LOCAL_TRANSCRIPT_CAP = 50;        // offline mirror keeps last N locally
 const FACTS_CAP = 50;                   // facts: keep newest 50
 
 // Default pinned shape (matches Firestore prefs.pinned layout).
 const EMPTY_PINNED = { idle: [], talking: [], showing: [] };
 
+// localStorage mirror keys are namespaced per username so two accounts on one
+// device never clobber each other.
+function prefsMirrorKey(u) { return 'gzowo.cache.prefs::' + u; }
+function factsMirrorKey(u) { return 'gzowo.cache.facts::' + u; }
+function transcriptMirrorKey(u) { return 'gzowo.cache.transcript::' + u; }
+
 // ============================================================================
 // Module state
 // ============================================================================
 
-let _demo = false;                      // running without real Firebase?
 let _app = null;
-let _auth = null;
-let _db = null;
-let _uid = null;                        // current signed-in uid (null when out)
+let _db = null;                         // Firestore | null (null => local-only)
+let _username = null;                   // current attached user (lowercase) | null
 
-let _prefsCache = null;                 // last-known prefs doc {theme,mode,muted,wakeEnabled,pinned}
+let _prefsCache = null;                 // last-known prefs doc
 let _factsCache = null;                 // last-known facts array (newest last)
 
 let _offlineToastShown = false;         // 'memory offline' toast fires once/session
@@ -86,12 +77,11 @@ let _prefsSubscribed = false;           // guard: only wire state.subscribe once
 const _prefUnsubs = [];                 // active state.subscribe disposers
 const _prefTimers = new Map();          // key -> debounce timeout handle
 let _applyingPrefs = false;             // true while we push loaded prefs INTO state
-                                        // (so our own subscribers don't echo them back)
 
 // Transcript batching.
 let _transcriptBuf = [];                // pending entries {role,text,ts}
 let _transcriptTimer = null;            // interval handle
-let _transcriptWrites = 0;             // Firestore writes used this session
+let _transcriptWrites = 0;              // Firestore writes used this session
 
 // ============================================================================
 // Helpers — localStorage (safe)
@@ -110,7 +100,7 @@ function lsSet(key, val) {
   try {
     localStorage.setItem(key, JSON.stringify(val));
   } catch {
-    // Storage full / disabled — nothing we can do, stay silent (best-effort mirror).
+    // Storage full / disabled — best-effort mirror, stay silent.
   }
 }
 
@@ -118,7 +108,7 @@ function lsSet(key, val) {
 // Helpers — config / degradation
 // ============================================================================
 
-/** Placeholder detection per contract: '' or starts with 'PASTE_'. */
+/** Placeholder detection: '' or starts with 'PASTE_'. */
 function isPlaceholder(v) {
   return typeof v !== 'string' || v === '' || v.startsWith('PASTE_');
 }
@@ -137,7 +127,7 @@ function warnOffline(where, err) {
   if (_offlineToastShown) return;
   _offlineToastShown = true;
   bus.emit('toast', {
-    text: 'Pamięć chwilowo offline — lecę na lokalnej.',
+    text: 'Pamięć chwilowo offline — działam na lokalnej kopii.',
     kind: 'warn'
   });
 }
@@ -146,8 +136,9 @@ function warnOffline(where, err) {
 // Helpers — prefs normalization
 // ============================================================================
 
-/** Sanitize a raw prefs doc into a known shape (missing keys stay undefined
- *  where the contract wants optionality, but pinned is always fully shaped). */
+/** Sanitize a raw prefs doc into a known shape. Unset scalar prefs stay
+ *  `undefined` (ignoreUndefinedProperties handles the write side); pinned is
+ *  always fully shaped. */
 function normalizePrefs(raw) {
   const p = raw && typeof raw === 'object' ? raw : {};
   const pinnedRaw = p.pinned && typeof p.pinned === 'object' ? p.pinned : {};
@@ -156,6 +147,7 @@ function normalizePrefs(raw) {
     mode: p.mode,
     muted: p.muted,
     wakeEnabled: p.wakeEnabled,
+    skills: Array.isArray(p.skills) ? p.skills : undefined,
     pinned: {
       idle: Array.isArray(pinnedRaw.idle) ? pinnedRaw.idle : [],
       talking: Array.isArray(pinnedRaw.talking) ? pinnedRaw.talking : [],
@@ -164,7 +156,7 @@ function normalizePrefs(raw) {
   };
 }
 
-/** Return only the {theme?,mode?,muted?,wakeEnabled?} view of a prefs doc. */
+/** Return only the {theme?,mode?,muted?,wakeEnabled?,skills?} view. */
 function prefsPublicView(p) {
   const out = {};
   for (const k of PREF_KEYS) {
@@ -178,9 +170,9 @@ function prefsPublicView(p) {
 // ============================================================================
 
 /**
- * Push loaded prefs INTO the shared state store (theme/mode/muted/wakeEnabled)
- * BEFORE 'memory:ready' is emitted. Guarded by _applyingPrefs so the
- * persistence subscribers below don't immediately write them back.
+ * Push loaded prefs INTO the shared state store BEFORE 'memory:ready'. Guarded
+ * by _applyingPrefs so the persistence subscribers below don't echo them back.
+ * @param {object} prefs
  */
 function applyPrefsToState(prefs) {
   _applyingPrefs = true;
@@ -196,9 +188,8 @@ function applyPrefsToState(prefs) {
 }
 
 /**
- * Wire debounced persistence: any change to theme/mode/muted/wakeEnabled in
- * state (from HUD, voice tools, etc.) is written through savePref after 800ms.
- * Idempotent — only wires once per session.
+ * Wire debounced persistence: any change to a PREF_KEY in state (from settings,
+ * voice tools, etc.) is written through savePref after 800ms. Idempotent.
  */
 function wirePrefPersistence() {
   if (_prefsSubscribed) return;
@@ -206,9 +197,7 @@ function wirePrefPersistence() {
 
   for (const key of PREF_KEYS) {
     const unsub = state.subscribe(key, (val) => {
-      // Ignore the echo from our own applyPrefsToState().
-      if (_applyingPrefs) return;
-      // Debounce per key.
+      if (_applyingPrefs) return;         // ignore the echo from applyPrefsToState()
       const prev = _prefTimers.get(key);
       if (prev) clearTimeout(prev);
       _prefTimers.set(key, setTimeout(() => {
@@ -221,62 +210,51 @@ function wirePrefPersistence() {
 }
 
 // ============================================================================
-// Firestore doc references (real mode only)
+// Firestore doc references (cloud mode only — guarded by _db && _username)
 // ============================================================================
 
-function userDocRef() {
-  return doc(_db, 'users', _uid);
-}
 function prefsDocRef() {
-  return doc(_db, 'users', _uid, 'meta', 'prefs');
+  return doc(_db, 'users', _username, 'meta', 'prefs');
 }
 function factsColRef() {
-  return collection(_db, 'users', _uid, 'facts');
+  return collection(_db, 'users', _username, 'facts');
 }
 function transcriptsColRef() {
-  return collection(_db, 'users', _uid, 'transcripts');
+  return collection(_db, 'users', _username, 'transcripts');
 }
 
 // ============================================================================
 // Prefs I/O
 // ============================================================================
 
-/**
- * Read prefs. Instant-boot strategy: return the localStorage mirror first if we
- * have one (handled by caller reading cache), then reconcile with the network
- * read here. This function performs the authoritative read and updates caches.
- */
+/** Authoritative prefs read; refreshes the instant-boot mirror. */
 async function readPrefsDoc() {
-  if (_demo) {
-    return normalizePrefs(lsGet(LS.demoPrefs, {}));
+  if (!_db || !_username) {
+    return normalizePrefs(lsGet(prefsMirrorKey(_username), {}));
   }
   try {
     const snap = await getDoc(prefsDocRef());
     const data = snap.exists() ? snap.data() : {};
     const norm = normalizePrefs(data);
-    lsSet(LS.cachePrefs, norm); // refresh instant-boot mirror
+    lsSet(prefsMirrorKey(_username), norm);
     return norm;
   } catch (err) {
     warnOffline('readPrefs', err);
-    return normalizePrefs(lsGet(LS.cachePrefs, {}));
+    return normalizePrefs(lsGet(prefsMirrorKey(_username), {}));
   }
 }
 
-/** Persist the whole (cached) prefs doc back to its store. */
+/** Persist the whole (cached) prefs doc. Mirror is written first so a later
+ *  network failure still boots correctly. */
 async function writePrefsDoc(prefs) {
   const norm = normalizePrefs(prefs);
-  if (_demo) {
-    lsSet(LS.demoPrefs, norm);
-    return;
-  }
-  // Always keep the mirror fresh so a later failure still boots correctly.
-  lsSet(LS.cachePrefs, norm);
+  if (_username) lsSet(prefsMirrorKey(_username), norm);
+  if (!_db || !_username) return;
   try {
-    // merge:true so partial docs never clobber sibling fields (e.g. pinned).
+    // merge:true so partial writes never clobber sibling fields (e.g. pinned).
     await setDoc(prefsDocRef(), norm, { merge: true });
   } catch (err) {
-    warnOffline('writePrefs', err);
-    // Mirror already written above — honest local fallback.
+    warnOffline('writePrefs', err);       // mirror already written — honest fallback
   }
 }
 
@@ -285,13 +263,12 @@ async function writePrefsDoc(prefs) {
 // ============================================================================
 
 async function readFacts() {
-  if (_demo) {
-    const arr = lsGet(LS.demoFacts, []);
+  if (!_db || !_username) {
+    const arr = lsGet(factsMirrorKey(_username), []);
     return Array.isArray(arr) ? arr.slice(-FACTS_CAP) : [];
   }
   try {
-    // Newest-last: order by ts asc, cap to newest FACTS_CAP by taking the tail
-    // of a desc-limited query then reversing.
+    // Newest-last: take the newest FACTS_CAP by desc ts, then reverse.
     const q = query(factsColRef(), orderBy('ts', 'desc'), limit(FACTS_CAP));
     const snap = await getDocs(q);
     const rows = [];
@@ -299,12 +276,12 @@ async function readFacts() {
       const t = d.data() && d.data().text;
       if (typeof t === 'string') rows.push(t);
     });
-    rows.reverse(); // -> newest last
-    lsSet(LS.cacheFacts, rows);
+    rows.reverse();                        // -> newest last
+    lsSet(factsMirrorKey(_username), rows);
     return rows;
   } catch (err) {
     warnOffline('loadFacts', err);
-    const arr = lsGet(LS.cacheFacts, []);
+    const arr = lsGet(factsMirrorKey(_username), []);
     return Array.isArray(arr) ? arr.slice(-FACTS_CAP) : [];
   }
 }
@@ -313,33 +290,27 @@ async function readFacts() {
 // Transcript batching
 // ============================================================================
 
-/** Ensure the periodic flush timer is running (real mode only). */
+/** Ensure the periodic flush timer is running (cloud mode only). */
 function ensureTranscriptTimer() {
-  if (_demo || _transcriptTimer) return;
-  _transcriptTimer = setInterval(() => {
-    flushTranscript();
-  }, TRANSCRIPT_FLUSH_MS);
+  if (!_db || _transcriptTimer) return;
+  _transcriptTimer = setInterval(flushTranscript, TRANSCRIPT_FLUSH_MS);
 }
 
-/** Write buffered transcript entries to Firestore (batched addDoc), honoring
- *  the per-session write cap. Fire-and-forget; failures are silent-dropped
- *  after mirroring the buffer locally so nothing blocks. */
+/** Write buffered transcript entries to Firestore, honoring the per-session
+ *  write cap. Fire-and-forget; failures warn once and stop, never block. */
 async function flushTranscript() {
-  if (_demo) { _transcriptBuf = []; return; }
+  if (!_db || !_username) { _transcriptBuf = []; return; }
   if (_transcriptBuf.length === 0) return;
-  if (!_uid) return;
 
-  // Take a snapshot and clear the buffer up front so new appends keep flowing.
+  // Snapshot + clear so new appends keep flowing while we write.
   const batch = _transcriptBuf;
   _transcriptBuf = [];
 
   const col = transcriptsColRef();
   for (const entry of batch) {
     if (_transcriptWrites >= TRANSCRIPT_WRITE_CAP) {
-      // Cap hit: stop writing this session. Drop the rest silently (transcripts
-      // are non-critical). Only note it once via the offline toast channel.
       warnOffline('transcript-cap', new Error('per-session transcript write cap reached'));
-      break;
+      break;                               // drop the rest silently (non-critical)
     }
     try {
       await addDoc(col, {
@@ -349,7 +320,6 @@ async function flushTranscript() {
       });
       _transcriptWrites += 1;
     } catch (err) {
-      // Silent-drop after a single honest warn — never block the app.
       warnOffline('appendTranscript', err);
       break;
     }
@@ -357,48 +327,66 @@ async function flushTranscript() {
 }
 
 // ============================================================================
-// Sign-in success flow (shared by real onAuthStateChanged and demo signIn)
+// Public: init() — Firestore app only. Never throws.
+// ============================================================================
+
+export async function init() {
+  const CONFIG = window.GZOWO_CONFIG || {};
+  const fb = CONFIG.firebase;
+
+  if (!isConfigValid(fb)) {
+    console.warn('[memory] Firebase config is a placeholder — cloud memory off, running on local mirrors only.');
+    _db = null;
+    return;
+  }
+
+  try {
+    _app = initializeApp(fb);
+    // initializeFirestore (not getFirestore) so we can set ignoreUndefinedProperties.
+    // normalizePrefs() emits `undefined` for any pref the user hasn't set yet;
+    // without this, a setDoc() carrying an undefined sibling field THROWS and
+    // silently kills all cloud pref persistence on fresh accounts.
+    _db = initializeFirestore(_app, { ignoreUndefinedProperties: true });
+  } catch (err) {
+    console.warn('[memory] Firestore init failed — running on local mirrors only.', err);
+    _db = null;
+  }
+}
+
+// ============================================================================
+// Public: attachUser() — called by custom-auth on every successful auth.
 // ============================================================================
 
 /**
- * Common post-auth flow: publish the user, load prefs + pinned, apply prefs to
- * state, wire persistence, then emit 'memory:ready'. Also writes the users/{uid}
- * doc (real mode) with lastLogin.
- * @param {{uid:string,name:string,email:string}} user
+ * Bind a username, load their prefs + facts (mirror-first for an instant boot),
+ * apply prefs to state, wire debounced persistence, ensure the transcript timer,
+ * and emit 'memory:ready' {prefs}. Never throws.
+ * @param {string} username
  */
-async function onSignedIn(user) {
-  _uid = user.uid;
-  state.set('user', user);
-  state.set('authResolved', true);
-  bus.emit('auth:ready', { user, demo: _demo });
+export async function attachUser(username) {
+  _username = String(username || '').toLowerCase();
 
-  // Touch the user doc (real mode) — name/email/lastLogin. Best-effort.
-  if (!_demo) {
-    try {
-      await setDoc(
-        userDocRef(),
-        { name: user.name, email: user.email, lastLogin: serverTimestamp() },
-        { merge: true }
-      );
-    } catch (err) {
-      warnOffline('userDoc', err);
-    }
+  // Instant boot: seed caches from the local mirror and apply immediately, so the
+  // UI has the right theme/mode before any network read resolves.
+  const mirror = lsGet(prefsMirrorKey(_username), null);
+  if (mirror) {
+    _prefsCache = normalizePrefs(mirror);
+    applyPrefsToState(_prefsCache);
+  }
+  const factsMirror = lsGet(factsMirrorKey(_username), null);
+  if (Array.isArray(factsMirror)) _factsCache = factsMirror.slice(-FACTS_CAP);
+
+  // Authoritative reads (network in cloud mode, mirror otherwise), then reconcile.
+  try {
+    _prefsCache = await readPrefsDoc();
+    _factsCache = await readFacts();
+  } catch (err) {
+    // readPrefsDoc/readFacts already degrade internally; this is belt-and-braces.
+    console.warn('[memory] attachUser load failed', err);
+    if (!_prefsCache) _prefsCache = normalizePrefs({});
+    if (!_factsCache) _factsCache = [];
   }
 
-  // Instant-boot: seed cache from the local mirror first (real mode), so the UI
-  // has something immediately, then reconcile with the authoritative read.
-  if (!_demo) {
-    const mirror = lsGet(LS.cachePrefs, null);
-    if (mirror) _prefsCache = normalizePrefs(mirror);
-  }
-
-  // Authoritative prefs read (network in real mode, LS in demo).
-  _prefsCache = await readPrefsDoc();
-  _factsCache = await readFacts();
-
-  // Apply prefs to state BEFORE 'memory:ready', then wire persistence so later
-  // changes flow back out (debounced). Order matters: apply first, wire after,
-  // so the initial apply is never mistaken for a user edit.
   applyPrefsToState(_prefsCache);
   wirePrefPersistence();
   ensureTranscriptTimer();
@@ -406,159 +394,18 @@ async function onSignedIn(user) {
   bus.emit('memory:ready', { prefs: prefsPublicView(_prefsCache) });
 }
 
-/** Sign-out flow: clear session-scoped memory, flush pending transcript. */
-function onSignedOut() {
-  flushTranscript(); // best-effort final flush of whatever is buffered
-  _uid = null;
-  state.set('user', null);
-  state.set('authResolved', true);
-  bus.emit('auth:ready', { user: null, demo: _demo });
-}
-
 // ============================================================================
-// Public: init()
+// Public: accessors
 // ============================================================================
 
-export async function init() {
-  const CONFIG = window.GZOWO_CONFIG || {};
-  const fb = CONFIG.firebase;
-
-  // Force demo without touching the real config: append ?demo=1 to the URL
-  // (or set CONFIG.forceDemo=true). Lets you into the app with ANY login while
-  // real Firebase auth stays the default. Handy for a quick look / when a
-  // password is being sorted out.
-  let forceDemo = CONFIG.forceDemo === true;
-  try { forceDemo = forceDemo || new URLSearchParams(location.search).has('demo'); } catch { /* no location */ }
-
-  // ---- DEMO MODE (placeholder config OR forced) ----------------------------
-  if (forceDemo || !isConfigValid(fb)) {
-    _demo = true;
-    console.warn(
-      '[memory] DEMO MODE — Firebase config is placeholder. Persistence via localStorage only; nic nie leci do chmury.'
-    );
-    state.set('demo', true);
-    state.set('authResolved', true);
-    // Signed-out at boot; the intro shows the demo badge off state.get('demo').
-    bus.emit('auth:ready', { user: null, demo: true });
-    return;
-  }
-
-  // ---- REAL MODE -----------------------------------------------------------
-  try {
-    _app = initializeApp(fb);
-    _auth = getAuth(_app);
-    // initializeFirestore (not getFirestore) so we can set ignoreUndefinedProperties.
-    // normalizePrefs() emits `undefined` for any pref the user hasn't set yet;
-    // without this, the first setDoc() with an undefined sibling field THROWS
-    // ("Unsupported field value: undefined"), silently killing ALL cloud prefs +
-    // pinned persistence on fresh accounts (only the localStorage mirror survives).
-    _db = initializeFirestore(_app, { ignoreUndefinedProperties: true });
-  } catch (err) {
-    // Firebase itself failed to initialize — degrade to demo so the app boots.
-    console.warn('[memory] Firebase init failed — falling back to demo mode.', err);
-    _demo = true;
-    state.set('demo', true);
-    state.set('authResolved', true);
-    bus.emit('auth:ready', { user: null, demo: true });
-    return;
-  }
-
-  // Auth listener drives the whole flow. It fires immediately with the current
-  // user (or null) and again on every sign-in/out.
-  onAuthStateChanged(_auth, (fbUser) => {
-    if (fbUser) {
-      const email = fbUser.email || '';
-      const name = fbUser.displayName || (email ? email.split('@')[0] : 'GOŚĆ');
-      // onSignedIn is async; fire-and-forget (errors are internally handled).
-      onSignedIn({ uid: fbUser.uid, name, email }).catch((err) => {
-        console.error('[memory] onSignedIn failed', err);
-        // Still surface auth so boot never hangs.
-        bus.emit('memory:ready', { prefs: {} });
-      });
-    } else {
-      onSignedOut();
-    }
-  });
+/** @returns {import('firebase/firestore').Firestore|null} */
+export function getDb() {
+  return _db;
 }
 
-// ============================================================================
-// Public: signIn / signOutUser
-// ============================================================================
-
-/**
- * Sign in. Real mode maps Firebase errors to Edek-flavored PL messages.
- * Demo mode accepts any non-empty credentials and synthesizes a demo user,
- * firing the same auth:ready/memory:ready flow.
- * @param {string} email
- * @param {string} password
- * @returns {Promise<{ok:true}|{ok:false,error:string}>}
- */
-export async function signIn(email, password) {
-  // ---- DEMO ----
-  if (_demo) {
-    if (!email || !password) {
-      return { ok: false, error: 'Podaj login i hasło, człowieku.' };
-    }
-    const local = String(email).split('@')[0] || 'GOŚĆ';
-    const user = { uid: 'demo', name: local, email: String(email) };
-    await onSignedIn(user);
-    return { ok: true };
-  }
-
-  // ---- REAL ----
-  if (!_auth) {
-    return { ok: false, error: 'Coś nie pykło — spróbuj jeszcze raz' };
-  }
-  try {
-    await signInWithEmailAndPassword(_auth, email, password);
-    // onAuthStateChanged will drive onSignedIn -> auth:ready/memory:ready.
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: mapAuthError(err && err.code) };
-  }
-}
-
-/** Map Firebase auth error codes to short PL messages in Edek tone. */
-function mapAuthError(code) {
-  switch (code) {
-    case 'auth/wrong-password':
-      return 'Złe hasło';
-    case 'auth/user-not-found':
-      return 'Nie ma takiego konta';
-    case 'auth/invalid-credential':
-      // v10 collapses wrong-password/user-not-found into invalid-credential.
-      return 'Złe hasło albo nie ma takiego konta';
-    case 'auth/network-request-failed':
-      return 'Błąd sieci';
-    case 'auth/invalid-email':
-      return 'Zły format loginu';
-    case 'auth/user-disabled':
-      return 'Konto zablokowane';
-    case 'auth/operation-not-allowed':
-      return 'Włącz Email/Password w Firebase';
-    default:
-      return 'Coś nie pykło — spróbuj jeszcze raz';
-  }
-}
-
-export async function signOutUser() {
-  // Flush any buffered transcript before tearing down.
-  await flushTranscript();
-
-  if (_demo) {
-    // Demo has no real session; just publish the signed-out state.
-    onSignedOut();
-    return;
-  }
-  if (!_auth) return;
-  try {
-    await signOut(_auth);
-    // onAuthStateChanged(null) will fire onSignedOut for us.
-  } catch (err) {
-    console.warn('[memory] signOut failed', err);
-    // Force the signed-out state locally so the UI isn't stuck.
-    onSignedOut();
-  }
+/** @returns {string|null} */
+export function getUsername() {
+  return _username;
 }
 
 // ============================================================================
@@ -566,31 +413,31 @@ export async function signOutUser() {
 // ============================================================================
 
 export const memory = {
+  attachUser,
+  getDb,
+  getUsername,
+
   /**
-   * Load prefs -> {theme?,mode?,muted?,wakeEnabled?}. Uses the in-memory cache
-   * when available (already reconciled at sign-in), else reads the store.
-   * @returns {Promise<{theme?:string,mode?:object,muted?:boolean,wakeEnabled?:boolean}>}
+   * Load prefs -> {theme?,mode?,muted?,wakeEnabled?,skills?}. Uses the reconciled
+   * in-memory cache when available, else reads the store.
+   * @returns {Promise<object>}
    */
   async loadPrefs() {
-    if (!_prefsCache) {
-      _prefsCache = await readPrefsDoc();
-    }
+    if (!_prefsCache) _prefsCache = await readPrefsDoc();
     return prefsPublicView(_prefsCache);
   },
 
   /**
    * Persist a single pref key/value. Updates the cached prefs doc and writes it
-   * through (debounced at the call site via state.subscribe, but also safe to
-   * call directly). Only known pref keys are accepted.
-   * @param {'theme'|'mode'|'muted'|'wakeEnabled'} key
+   * through (mirrors + degrades honestly). Only known pref keys are accepted.
+   * @param {'theme'|'mode'|'muted'|'wakeEnabled'|'skills'} key
    * @param {*} val
    */
   savePref(key, val) {
     if (!PREF_KEYS.includes(key)) return;
     if (!_prefsCache) _prefsCache = normalizePrefs({});
     _prefsCache[key] = val;
-    // Fire-and-forget write; internally mirrors + degrades honestly.
-    writePrefsDoc(_prefsCache);
+    writePrefsDoc(_prefsCache);            // fire-and-forget
   },
 
   /**
@@ -618,9 +465,9 @@ export const memory = {
   },
 
   /**
-   * Append a transcript entry. Buffered in RAM, flushed every 5s or every 10
-   * entries, capped at 200 Firestore writes/session. Fire-and-forget. In demo
-   * mode we keep only the last 50 entries in localStorage (no cloud).
+   * Append a transcript entry. Buffered in RAM, flushed every 5s / every 10
+   * entries, capped at 200 Firestore writes/session. Without a db (local mode)
+   * the last 50 are mirrored to localStorage. Fire-and-forget.
    * @param {{role:'user'|'gzowo', text:string, ts?:number}} entry
    */
   appendTranscript(entry) {
@@ -631,25 +478,23 @@ export const memory = {
       ts: entry.ts != null ? entry.ts : Date.now()
     };
 
-    if (_demo) {
-      // Demo: mirror last N locally, no cloud writes.
-      const arr = lsGet(LS.demoTranscript, []);
-      const next = (Array.isArray(arr) ? arr : []).concat(rec).slice(-DEMO_TRANSCRIPT_CAP);
-      lsSet(LS.demoTranscript, next);
+    if (!_db) {
+      // Local mode: keep a bounded honest mirror, no cloud writes.
+      if (!_username) return;
+      const arr = lsGet(transcriptMirrorKey(_username), []);
+      const next = (Array.isArray(arr) ? arr : []).concat(rec).slice(-LOCAL_TRANSCRIPT_CAP);
+      lsSet(transcriptMirrorKey(_username), next);
       return;
     }
 
     _transcriptBuf.push(rec);
     ensureTranscriptTimer();
-    if (_transcriptBuf.length >= TRANSCRIPT_FLUSH_COUNT) {
-      // Fire-and-forget size-triggered flush.
-      flushTranscript();
-    }
+    if (_transcriptBuf.length >= TRANSCRIPT_FLUSH_COUNT) flushTranscript();
   },
 
   /**
-   * Save a learned fact about the user. Newest-last semantics; cache trimmed to
-   * FACTS_CAP. Fire-and-forget write with honest local fallback.
+   * Save a learned fact about the user. Newest-last; cache trimmed to FACTS_CAP.
+   * Fire-and-forget write with honest local fallback.
    * @param {string} text
    */
   async saveFact(text) {
@@ -658,14 +503,9 @@ export const memory = {
 
     if (!_factsCache) _factsCache = [];
     _factsCache = _factsCache.concat(clean).slice(-FACTS_CAP);
+    if (_username) lsSet(factsMirrorKey(_username), _factsCache);
 
-    if (_demo) {
-      lsSet(LS.demoFacts, _factsCache);
-      return;
-    }
-
-    // Keep the cloud mirror fresh regardless of network outcome.
-    lsSet(LS.cacheFacts, _factsCache);
+    if (!_db || !_username) return;
     try {
       await addDoc(factsColRef(), { text: clean, ts: Date.now() });
     } catch (err) {
@@ -674,11 +514,20 @@ export const memory = {
   },
 
   /**
-   * Load learned facts -> string[] (max 50, newest last).
+   * Load learned facts -> string[] (max 50, newest last). Refreshes the cache.
    * @returns {Promise<string[]>}
    */
   async loadFacts() {
     _factsCache = await readFacts();
     return [..._factsCache];
+  },
+
+  /**
+   * SYNC access to the last-loaded facts. gemini-live builds its system prompt
+   * from this at connect() time WITHOUT awaiting the network (latency contract).
+   * @returns {string[]}
+   */
+  getFactsCached() {
+    return Array.isArray(_factsCache) ? [..._factsCache] : [];
   }
 };

@@ -1,0 +1,220 @@
+/* css/islands.css — the two floating liquid-glass pills (GŁOS + TRYBY) and the
+   TRYBY modes panel. v2 chrome: this is the ONLY chrome left at the bottom.
+   Strictly B&W — every value comes from css/design-tokens.css. Animate transform
+   and opacity only (60fps on Intel i9). The glass surface itself is the shared
+   .glass recipe from base.css; this sheet only sizes, floats, reveals and states.
+
+   Layering per pill (three decoupled transforms, zero conflict):
+     .island-reveal  -> startup reveal (opacity + slide-up, staggered)
+     .island-bob     -> perpetual gentle float (±3px, phase-offset per pill)
+     .island         -> hover lift (-2px) + live/connecting states
+   ------------------------------------------------------------------------- */
+
+/* ---- Reveal wrapper: hidden during auth, slides up from startup onward ---- */
+.island-reveal {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--t-cine) var(--ease-out),
+    transform var(--t-cine) var(--ease-out);
+}
+/* Second pill trails the first by 120ms for a staggered reveal. */
+.island-reveal.is-second {
+  transition-delay: 120ms;
+}
+body[data-ui='auth'] .island-reveal {
+  opacity: 0;
+  transform: translateY(24px);
+}
+/* No interaction until the reveal begins (auth gate owns the screen). */
+body[data-ui='auth'] #islands { pointer-events: none; }
+body[data-ui='auth'] #islands > * { pointer-events: none; }
+
+/* ---- Float wrapper: perpetual idle bob ---- */
+.island-bob {
+  animation: island-bob 4s var(--ease-in-out) infinite alternate;
+  will-change: transform;
+}
+/* Phase-offset the second pill so the two never move in lockstep. */
+.island-reveal.is-second .island-bob {
+  animation-delay: -2s;
+}
+@keyframes island-bob {
+  from { transform: translateY(3px); }
+  to   { transform: translateY(-3px); }
+}
+/* The modes pill wrapper doubles as the positioning context for its panel. */
+.island-group { position: relative; }
+
+/* ---- The pill itself ---- */
+.island {
+  appearance: none;
+  -webkit-appearance: none;
+  height: var(--islands-h);
+  padding: 0 var(--space-6);
+  border-radius: calc(var(--islands-h) / 2);   /* full pill */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    background-color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
+  will-change: transform;
+}
+.island:hover {
+  background: var(--glass-bg-active);
+  border-color: var(--glass-border-bright);
+  transform: translateY(-2px);
+}
+.island:active { transform: translateY(0); }
+
+/* Label rides above the .glass ::before sheen. */
+.island-label {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---- GŁOS states ---- */
+/* connecting -> dimmed label ('ŁĄCZĘ…') */
+.island-voice.is-connecting .island-label { color: var(--fg-dim); }
+
+/* live -> soft opacity pulse on a ring (::after), transform/opacity only */
+.island-voice.is-live::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid var(--glass-border-bright);
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.2;
+  animation: island-pulse 1.8s var(--ease-in-out) infinite;
+}
+@keyframes island-pulse {
+  0%, 100% { opacity: 0.15; }
+  50%      { opacity: 0.6; }
+}
+
+/* ---- TRYBY panel: expands upward from the pill ---- */
+.modes-panel {
+  position: absolute;
+  bottom: calc(100% + var(--space-3));
+  left: 50%;
+  min-width: 260px;
+  max-width: 92vw;
+  padding: var(--space-4);
+  border-radius: var(--glass-radius-sm);
+  /* closed state */
+  transform: translateX(-50%) scaleY(0.85);
+  transform-origin: bottom center;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    transform var(--t-med) var(--ease-out),
+    opacity var(--t-med) var(--ease-out),
+    visibility 0s linear var(--t-med);
+}
+.modes-panel.is-open {
+  transform: translateX(-50%) scaleY(1);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    transform var(--t-med) var(--ease-out),
+    opacity var(--t-med) var(--ease-out),
+    visibility 0s;
+}
+/* Panel content sits above the glass sheen. */
+.modes-panel > .modes-row {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- Panel rows: WEJŚCIE / WYJŚCIE ---- */
+.modes-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.modes-row + .modes-row { margin-top: var(--space-3); }
+
+.modes-row-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.modes-opts {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+
+.mode-opt {
+  appearance: none;
+  -webkit-appearance: none;
+  min-width: 64px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--glass-radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
+}
+.mode-opt:hover { background: var(--glass-bg-active); }
+/* active option inverted: white bg, black text */
+.mode-opt.is-active {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+
+/* ---- Mobile: pills shrink via tokens; keep the panel on-screen ---- */
+@media (max-width: 720px) {
+  .modes-panel {
+    min-width: 0;
+    width: max-content;
+    max-width: 92vw;
+  }
+}
+
+/* ---- Reduced motion: fade only, no bob, no scale, no pulse motion ---- */
+@media (prefers-reduced-motion: reduce) {
+  .island-bob { animation: none; }
+  .island-reveal {
+    transition: opacity var(--t-med) var(--ease-out);
+  }
+  body[data-ui='auth'] .island-reveal { transform: none; }
+  .island-voice.is-live::after { animation: none; opacity: 0.4; }
+  .modes-panel {
+    transform: translateX(-50%);
+    transition: opacity var(--t-fast) linear, visibility 0s linear var(--t-fast);
+  }
+  .modes-panel.is-open {
+    transform: translateX(-50%);
+    transition: opacity var(--t-fast) linear, visibility 0s;
+  }
+}

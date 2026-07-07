@@ -1,0 +1,196 @@
+/* css/settings.css — the voice-only Settings panel.
+   Strict B&W: every color comes from design-tokens.css (--bg/--fg/gray/line/glass).
+   The card reuses the shared .glass recipe from base.css. Only transform + opacity
+   are ever transitioned (60fps on Intel i9, no layout/paint animation). */
+
+/* ---- Backdrop: scrim + centering. Fades in with the panel. -------------- */
+.settings-backdrop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+  background: var(--scrim);
+  opacity: 0;
+  transition: opacity var(--t-med) var(--ease-out);
+}
+#settings-layer.is-open .settings-backdrop {
+  opacity: 1;
+}
+
+/* ---- Card: the shared glass surface, sized per brief. ------------------- */
+.settings-card {
+  width: 92vw;
+  max-width: 520px;
+  max-height: 80vh;
+  overflow-y: auto;          /* overrides .glass overflow:hidden on the Y axis */
+  border-radius: var(--glass-radius-sm);
+  padding: var(--space-6);
+  opacity: 0;
+  transform: scale(0.96);
+  transform-origin: center;
+  transition:
+    transform var(--t-med) var(--ease-out),
+    opacity var(--t-med) var(--ease-out);
+}
+#settings-layer.is-open .settings-card {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* Lift real content above the .glass ::before sheen so text stays crisp. */
+.settings-card > .settings-head,
+.settings-card > .settings-section {
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- Header ------------------------------------------------------------- */
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+.settings-title {
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg);
+}
+.settings-close {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-xl);
+  line-height: 1;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.settings-close:hover { color: var(--fg); }
+
+/* ---- Sections + hairline separators ------------------------------------ */
+.settings-section {
+  padding: var(--space-5) 0;
+  border-top: 1px solid var(--line);
+}
+.settings-section:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+.settings-section:last-of-type {
+  padding-bottom: 0;
+}
+.settings-label {
+  margin-bottom: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+/* ---- Segmented control: active option inverted (white-on-black) --------- */
+.seg {
+  display: flex;
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--glass-radius-sm);
+  overflow: hidden;
+}
+.seg-opt {
+  flex: 1 1 0;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  padding: var(--space-3) var(--space-4);
+  text-align: center;
+  cursor: pointer;
+}
+.seg-opt + .seg-opt {
+  border-left: 1px solid var(--line-strong);
+}
+.seg-opt:hover { color: var(--fg); }
+.seg-opt.is-active {
+  background: var(--fg);
+  color: var(--bg);
+}
+/* Wake WŁĄCZONY when the model isn't reachable: dimmed but still clickable —
+   the wake module honors the saved preference once the model loads. */
+.seg-opt.is-dimmed { opacity: 0.45; }
+.seg-opt.is-dimmed.is-active { opacity: 0.6; }
+
+/* ---- Wake status line (truthful, driven by wakeModelStatus) ------------- */
+.settings-status {
+  margin-top: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking);
+  color: var(--fg-faint);
+}
+
+/* ---- KONTO row --------------------------------------------------------- */
+.settings-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+.settings-user {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-dim);
+}
+.settings-user b {
+  color: var(--fg);
+  font-weight: 700;
+}
+.settings-logout {
+  flex: 0 0 auto;
+  appearance: none;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--glass-radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+.settings-logout:hover {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+
+/* ---- Reduced motion: drop the scale, keep a quick fade ------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .settings-backdrop,
+  .settings-card {
+    transition-duration: 1ms;
+  }
+  .settings-card,
+  #settings-layer.is-open .settings-card {
+    transform: none;
+  }
+}

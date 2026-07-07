@@ -4,7 +4,7 @@
 // health poll is the ONLY loop — no retry storms. init() NEVER throws.
 //
 // Token chain (getToken): bridge /token -> worker /token -> null. Honest
-// degradation: a bridge that just fell emits one Polish toast in Edek's tone.
+// degradation: a bridge that just fell emits one plain Polish toast.
 
 import { bus } from './core/event-bus.js';
 import { state } from './core/state-manager.js';
@@ -17,6 +17,17 @@ const POLL_INTERVAL = 10000;
 const TOKEN_TIMEOUT = 3000;
 const PROJECTS_TIMEOUT = 5000;
 const STT_TIMEOUT = 20000;
+const HA_STATES_TIMEOUT = 6000;   // read path — fast
+const HA_SERVICE_TIMEOUT = 8000;  // mutating call — a touch more slack
+const HA_BAMBU_TIMEOUT = 8000;    // reads the full state list, then filters
+const FETCH_PAGE_TIMEOUT = 12000; // remote page fetch happens server-side
+
+// Parse a non-OK bridge response into a thrown {status, error, ...} object.
+async function parseErr(res) {
+  let err = { status: res.status };
+  try { err = { ...err, ...(await res.json()) }; } catch { /* non-JSON body */ }
+  return err;
+}
 
 function bridgeUrl(path) {
   const base = (CONFIG && CONFIG.bridge && CONFIG.bridge.url) || '';
@@ -31,7 +42,7 @@ function workerUrl(path) {
 
 export const bridgeClient = {
   _online: false,
-  _features: { projects: false, whisper: false, ha: false },
+  _features: { projects: false, whisper: false, ha: false, fetch: false },
   _everOnline: false,   // have we ever seen the bridge up? (gates the "fell" toast)
   _polling: false,
 
@@ -51,12 +62,21 @@ export const bridgeClient = {
   },
 
   /**
+   * Last known feature map from /health. Consumers (e.g. the Home Assistant
+   * connector) read this to decide availability without re-probing.
+   * @returns {{projects:boolean, whisper:boolean, ha:boolean, fetch:boolean}}
+   */
+  features() {
+    return this._features;
+  },
+
+  /**
    * One health probe. Updates state on transitions, emits 'bridge:status',
-   * and toasts once (Edek tone) the first time the bridge drops after being up.
+   * and toasts once the first time the bridge drops after having been up.
    */
   async _poll() {
     let online = false;
-    let features = { projects: false, whisper: false, ha: false };
+    let features = { projects: false, whisper: false, ha: false, fetch: false };
     try {
       const res = await fetch(bridgeUrl('/health'), {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT)
@@ -81,9 +101,9 @@ export const bridgeClient = {
       state.set('bridgeOnline', online);
       bus.emit('bridge:status', { online, features });
 
-      // First drop after having been online: honest degradation, Edek style.
+      // First drop after having been online: honest degradation notice.
       if (!online && this._everOnline) {
-        bus.emit('toast', { text: 'Most padł — lecę w trybie lite.', kind: 'warn' });
+        bus.emit('toast', { text: 'Most offline — część funkcji niedostępna.', kind: 'warn' });
       }
     }
   },
@@ -119,6 +139,72 @@ export const bridgeClient = {
       try { err = { ...err, ...(await res.json()) }; } catch { /* ignore */ }
       throw err;
     }
+    return res.json();
+  },
+
+  /**
+   * List Home Assistant states via the bridge (already trimmed server-side).
+   * @param {{domain?:string, prefix?:string}} [opts] optional filters
+   * @returns {Promise<Array<{entity_id:string,state:string,attributes:object}>>}
+   *          throws {offline:true} when the bridge is down; {status,error} on non-OK.
+   */
+  async haStates({ domain, prefix } = {}) {
+    if (!this._online) throw { offline: true };
+    const qs = new URLSearchParams();
+    if (domain) qs.set('domain', domain);
+    if (prefix) qs.set('prefix', prefix);
+    const q = qs.toString();
+    const res = await fetch(bridgeUrl('/ha/states' + (q ? '?' + q : '')), {
+      signal: AbortSignal.timeout(HA_STATES_TIMEOUT)
+    });
+    if (!res.ok) throw await parseErr(res);
+    return res.json();
+  },
+
+  /**
+   * Call a Home Assistant service through the bridge.
+   * @param {{domain:string, service:string, data?:object}} payload
+   * @returns {Promise<Array>} HA's changed-states array (may be empty).
+   *          throws {offline:true} when the bridge is down; {status,error} on non-OK.
+   */
+  async haService({ domain, service, data } = {}) {
+    if (!this._online) throw { offline: true };
+    const res = await fetch(bridgeUrl('/ha/service'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain, service, data: data || {} }),
+      signal: AbortSignal.timeout(HA_SERVICE_TIMEOUT)
+    });
+    if (!res.ok) throw await parseErr(res);
+    return res.json();
+  },
+
+  /**
+   * Fetch the Bambu printer + camera summary the bridge assembles from HA.
+   * @returns {Promise<{ok:boolean, printer:object, camera:object|null}>}
+   *          throws {offline:true} when the bridge is down; {status,error} on non-OK.
+   */
+  async haBambu() {
+    if (!this._online) throw { offline: true };
+    const res = await fetch(bridgeUrl('/ha/bambu'), {
+      signal: AbortSignal.timeout(HA_BAMBU_TIMEOUT)
+    });
+    if (!res.ok) throw await parseErr(res);
+    return res.json();
+  },
+
+  /**
+   * Server-side fetch of a web page (title + stripped text) via the bridge.
+   * @param {string} url  http/https URL to fetch
+   * @returns {Promise<{ok:boolean, title:string, text:string}>}
+   *          throws {offline:true} when the bridge is down; {status,error} on non-OK.
+   */
+  async fetchPage(url) {
+    if (!this._online) throw { offline: true };
+    const res = await fetch(bridgeUrl('/fetch?url=' + encodeURIComponent(url)), {
+      signal: AbortSignal.timeout(FETCH_PAGE_TIMEOUT)
+    });
+    if (!res.ok) throw await parseErr(res);
     return res.json();
   },
 

@@ -1,13 +1,19 @@
-// js/core/layout-engine.js — layout-owned, FINAL.
+// js/core/layout-engine.js — layout-owned, FINAL (v2).
 // ============================================================================
 // THE SINGLE AUTHORITY FOR POSITIONING. Guarantor of "Prawo ruchu":
-//   (1) ZERO overlap — ever — between widgets, and between widgets and the orb
-//       zone / HUD / dock / chat. Achieved BY CONSTRUCTION: we compute disjoint
-//       slot rectangles and nothing else positions widgets.
+//   (1) ZERO overlap — ever — between widgets, and between widgets and the
+//       avatar zone / islands clearance. Achieved BY CONSTRUCTION: we compute
+//       disjoint slot rectangles and nothing else positions widgets.
 //   (2) Choreography — every add/remove/state-change is animated (fly-in,
 //       fly-out, fly-to-trash), neighbors FLIP-glide to their new slots.
-//   (3) Orb never occluded — we reserve an orb zone, subtract it from widget
-//       space, and emit its rect ('orb:slot') so the orb follows.
+//   (3) Avatar never occluded — we reserve an avatar zone, subtract it from
+//       widget space, and emit its rect ('avatar:slot') so the avatar follows.
+//
+// v2 deltas vs v1: no top bar (--hud-h gone), no dock (--dock-h gone), the chat
+// is a floating bubble that reserves nothing (the old reserved-right API is gone),
+// and the widget frame carries NO pin/close controls — pinning stays an
+// assistant-only API. The trash choreography emits 'trash:throw'/'trash:done'
+// around fly-outs.
 //
 // Perf law: animate transform + opacity ONLY (Web Animations API), batch DOM
 // reads then writes, never animate layout properties. Target 60fps on Intel i9.
@@ -20,14 +26,13 @@ import { el } from '../widgets/widget-base.js';
 
 // ---- Constants --------------------------------------------------------------
 const LAYER_ID = 'widget-layer';
-const TRASH_ID = 'trash-target';
-const DOCK_ID = 'dock';
+const TRASH_ID = 'trash-corner';
 
-const HALO_IDLE = 1.4;   // orb-idle-ratio halo factor (centered orb zone)
-const HALO_CORNER = 1.6; // orb-corner-ratio halo factor (top-left orb zone)
+const HALO_IDLE = 1.4;   // avatar-idle-ratio halo factor (centered avatar zone)
+const HALO_CORNER = 1.6; // avatar-corner-ratio halo factor (top-left avatar zone)
 
-const MAX_GRID_RETRIES = 3;   // extra columns to try when cells collide w/ orb
-const MAX_PINNED_COMPACT = 4; // idle/talking: at most 4 pinned widgets ring orb
+const MAX_GRID_RETRIES = 3;   // extra columns to try when cells collide w/ avatar
+const MAX_PINNED_COMPACT = 4; // idle/talking: at most 4 pinned widgets ring avatar
 const SINGLE_CAP = 0.70;      // single showing widget caps to 70% of free rect
 const COMPACT_MIN_W = 240;    // idle/talking compact slot clamp
 const COMPACT_MAX_W = 340;
@@ -49,12 +54,11 @@ const MOTION = {
 
 // ---- Token cache (recomputed on resize) -------------------------------------
 const METRICS = {
-  hudH: 48,
-  dockH: 56,
+  islandsClearance: 112, // --islands-clearance (bottom safe-area reserve)
   gap: 16,
-  margin: 24,        // --space-5
-  orbIdleRatio: 0.30,
-  orbCornerRatio: 0.12
+  margin: 24,            // --space-5
+  avatarIdleRatio: 0.30,
+  avatarCornerRatio: 0.12
 };
 
 // ---- Engine state -----------------------------------------------------------
@@ -81,7 +85,6 @@ const order = [];
 const cleanups = new WeakMap();
 
 let layer = null;
-let reservedRight = 0;
 let resizeTimer = 0;
 let inited = false;
 let reflowScheduled = false;
@@ -117,12 +120,11 @@ function readTokens() {
     const n = parseFloat(raw);
     return Number.isFinite(n) ? n : fallback;
   };
-  METRICS.hudH = num('--hud-h', 48);
-  METRICS.dockH = num('--dock-h', 56);
+  METRICS.islandsClearance = num('--islands-clearance', 112);
   METRICS.gap = num('--widget-gap', 16);
   METRICS.margin = num('--space-5', 24);
-  METRICS.orbIdleRatio = num('--orb-idle-ratio', 0.30);
-  METRICS.orbCornerRatio = num('--orb-corner-ratio', 0.12);
+  METRICS.avatarIdleRatio = num('--avatar-idle-ratio', 0.30);
+  METRICS.avatarCornerRatio = num('--avatar-corner-ratio', 0.12);
 
   MOTION.flyDistance = num('--fly-distance', 120);
   MOTION.stagger = num('--stagger', 40);
@@ -141,45 +143,48 @@ function prefersReducedMotion() {
 }
 
 // ============================================================================
-// Safe area + orb zone
+// Safe area + avatar zone
 // ============================================================================
-/** Viewport minus HUD top, dock bottom, reservedRight, and --space-5 inset. */
+/**
+ * Viewport inset by --space-5 on top/left/right and by --islands-clearance on
+ * the bottom. No HUD, no dock (v2), and the chat bubble floats and reserves
+ * nothing — so the field is symmetric except for the bottom islands clearance.
+ */
 function safeArea() {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const m = METRICS.margin;
   const x = m;
-  const y = METRICS.hudH + m;
-  const w = Math.max(0, vw - reservedRight - m - x);
-  const h = Math.max(0, vh - METRICS.dockH - m - y);
+  const y = m;
+  const w = Math.max(0, vw - m - x);
+  const h = Math.max(0, vh - METRICS.islandsClearance - y);
   return rect(x, y, w, h);
 }
 
 /**
- * The orb zone for the current UI state, in viewport coords.
- * - idle/talking: centered square, side = orbIdleRatio × min(vw,vh) × HALO_IDLE
- * - showing:      top-left square at safe-area corner,
- *                 side = orbCornerRatio × min(vw,vh) × HALO_CORNER
- * - intro:        null (orb hidden)
- * Returns { zone: rect|null, halo, visualR } where visualR is the on-screen orb
- * radius (zone side / 2 ÷ halo) and zone.cx/cy is the orb center to emit.
+ * The avatar zone for the current UI state, in viewport coords.
+ * - startup/idle/talking: centered square, side = idleRatio × min(vw,vh) × HALO_IDLE
+ * - showing:              top-left square at safe-area corner,
+ *                         side = cornerRatio × min(vw,vh) × HALO_CORNER
+ * - auth:                 null (avatar hidden — no 'avatar:slot' emitted)
+ * Returns { zone: rect|null, halo, visualR } where visualR is the on-screen
+ * avatar radius (zone side / 2 ÷ halo) and zone.cx/cy is the center to emit.
  */
-function orbZone(ui, area) {
+function avatarZone(ui, area) {
   const minSide = Math.min(window.innerWidth, window.innerHeight);
-  if (ui === 'intro') return { zone: null, halo: HALO_IDLE, visualR: 0 };
+  if (ui === 'auth') return { zone: null, halo: HALO_IDLE, visualR: 0 };
 
   if (ui === 'showing') {
-    const side = METRICS.orbCornerRatio * minSide * HALO_CORNER;
+    const side = METRICS.avatarCornerRatio * minSide * HALO_CORNER;
     // Anchor at the safe-area top-left corner (inside the margin).
     const zone = rect(area.x, area.y, side, side);
     return { zone, halo: HALO_CORNER, visualR: side / 2 / HALO_CORNER };
   }
 
-  // idle / talking → centered on the FREE area (viewport minus HUD/dock/margins
-  // and reservedRight for the chat panel), NOT the raw viewport. Centering on the
-  // raw viewport left the orb overlapping the chat panel and the right-band compact
-  // slots when chat was open. `area` already has reservedRight subtracted.
-  const side = METRICS.orbIdleRatio * minSide * HALO_IDLE;
+  // startup / idle / talking → centered on the FREE area (viewport minus the
+  // margins + islands clearance), NOT the raw viewport, so compact slots ring a
+  // truly centered avatar.
+  const side = METRICS.avatarIdleRatio * minSide * HALO_IDLE;
   const cx = area.x + area.w / 2;
   const cy = area.y + area.h / 2;
   const zone = rect(cx - side / 2, cy - side / 2, side, side);
@@ -191,8 +196,8 @@ function orbZone(ui, area) {
 // ============================================================================
 /**
  * Compute disjoint slot rects for `n` visible widgets over the content area,
- * skipping any grid cell that intersects the orb zone. Density is increased
- * (add a column) up to MAX_GRID_RETRIES if the orb eats too many cells.
+ * skipping any grid cell that intersects the avatar zone. Density is increased
+ * (add a column) up to MAX_GRID_RETRIES if the avatar eats too many cells.
  *
  * @returns {{slots:rect[], capped:boolean}} slots.length may be < n (capped).
  */
@@ -200,7 +205,7 @@ function computeShowingSlots(n, area, zone) {
   if (n <= 0) return { slots: [], capped: false };
 
   // Special case: a single widget gets a large, comfortable cell placed in the
-  // free space to the RIGHT of the orb corner zone, capped to SINGLE_CAP.
+  // free space to the RIGHT of the avatar corner zone, capped to SINGLE_CAP.
   if (n === 1) {
     return { slots: [singleSlot(area, zone)], capped: false };
   }
@@ -211,7 +216,7 @@ function computeShowingSlots(n, area, zone) {
     let cols = Math.ceil(Math.sqrt(n)) + extraCols;
     let rows = Math.ceil(n / cols);
     const cells = gridCells(area, cols, rows);
-    // Keep only cells clear of the orb zone.
+    // Keep only cells clear of the avatar zone.
     const free = zone ? cells.filter((c) => !intersects(c, zone, 0)) : cells;
     if (free.length >= n) {
       return { slots: free.slice(0, n), capped: false };
@@ -241,13 +246,13 @@ function gridCells(area, cols, rows) {
   return cells;
 }
 
-/** One big centered cell in the free rect right of the orb corner zone. */
+/** One big centered cell in the free rect right of the avatar corner zone. */
 function singleSlot(area, zone) {
-  // Free rect = safe area minus the orb corner column (if the orb sits at
+  // Free rect = safe area minus the avatar corner column (if the avatar sits at
   // top-left, reclaim the space to its right + below).
   let free = area;
   if (zone && intersects(area, zone, 0)) {
-    // Prefer the horizontal band to the right of the orb; if too narrow, use
+    // Prefer the horizontal band to the right of the avatar; if too narrow, use
     // the vertical band below it.
     const rightW = area.x + area.w - (zone.x + zone.w) - METRICS.gap;
     const belowH = area.y + area.h - (zone.y + zone.h) - METRICS.gap;
@@ -265,21 +270,21 @@ function singleSlot(area, zone) {
 }
 
 // ============================================================================
-// IDLE / TALKING layout — fixed compact slots ringing the central orb
+// IDLE / TALKING layout — fixed compact slots ringing the central avatar
 // ============================================================================
 /**
- * Up to 4 pinned widgets in fixed bands around the centered orb:
+ * Up to 4 pinned widgets in fixed bands around the centered avatar:
  *   [0] mid-left band, [1] mid-right band, [2] bottom-left, [3] bottom-right.
- * Each ~ (orb side / 4), clamped to [COMPACT_MIN_W, COMPACT_MAX_W], 3:2 aspect,
- * gap-respecting, and asserted NOT to intersect the orb zone.
+ * Each ~ (avatar side / 4), clamped to [COMPACT_MIN_W, COMPACT_MAX_W], 3:2
+ * aspect, gap-respecting, and asserted NOT to intersect the avatar zone.
  */
 function computeCompactSlots(count, area, zone) {
   const n = Math.min(count, MAX_PINNED_COMPACT);
   if (n <= 0) return [];
 
-  const orbSide = zone ? zone.w : Math.min(area.w, area.h) * 0.4;
-  let w = clamp(orbSide / 4, COMPACT_MIN_W, COMPACT_MAX_W);
-  // Never wider than the side gutter available beside the orb.
+  const avatarSide = zone ? zone.w : Math.min(area.w, area.h) * 0.4;
+  let w = clamp(avatarSide / 4, COMPACT_MIN_W, COMPACT_MAX_W);
+  // Never wider than the side gutter available beside the avatar.
   const gutter = zone ? Math.max(0, zone.x - area.x - METRICS.gap) : area.w / 3;
   if (gutter > 0) w = Math.min(w, gutter);
   w = Math.max(w, 0);
@@ -289,7 +294,7 @@ function computeCompactSlots(count, area, zone) {
   const rightX = area.x + area.w - w;
 
   // Two vertical rows per gutter (top + bottom). They must NEVER overlap each
-  // other — `pushClear` only guards the orb zone, never widget↔widget, so the
+  // other — `pushClear` only guards the avatar zone, never widget↔widget, so the
   // separation is enforced here by construction. On short viewports where two
   // rows plus a gap don't fit, we collapse to a SINGLE centered row per gutter
   // (mid-left / mid-right only), so mid/bottom bands can never collide.
@@ -318,7 +323,7 @@ function computeCompactSlots(count, area, zone) {
   const slots = [];
   for (let i = 0; i < limit; i++) {
     let slot = candidates[i];
-    // Assert clearance: if a compact slot somehow grazes the orb zone (tiny
+    // Assert clearance: if a compact slot somehow grazes the avatar zone (tiny
     // viewport), nudge it outward toward its band edge until clear or give up.
     if (zone && intersects(slot, zone, 0)) {
       slot = pushClear(slot, zone, area);
@@ -328,7 +333,7 @@ function computeCompactSlots(count, area, zone) {
   return slots;
 }
 
-/** Nudge a rect away from the orb zone toward the nearest safe-area edge. */
+/** Nudge a rect away from the avatar zone toward the nearest safe-area edge. */
 function pushClear(slot, zone, area) {
   const goLeft = slot.cx < zone.cx;
   if (goLeft) {
@@ -349,6 +354,7 @@ function selectVisible(ui) {
     return inOrder; // all widgets compete for grid cells (may be capped)
   }
   // idle / talking → only widgets pinned for THIS state, max 4.
+  // auth / startup → nothing pins for those states, so this yields [].
   return inOrder
     .filter((w) => w.pinned.includes(ui))
     .slice(0, MAX_PINNED_COMPACT);
@@ -357,26 +363,16 @@ function selectVisible(ui) {
 // ============================================================================
 // Node building (engine is the sole frame builder)
 // ============================================================================
+// v2: the header shows the TITLE ONLY. No pin button, no close button, no
+// controls cluster — the user never manipulates widgets. Pinning/closing happen
+// exclusively through the assistant-only API (pin/unpin/removeWidget/clear).
 function buildNode(def) {
   const section = el('section', 'widget');
   section.dataset.id = def.id;
 
   const head = el('header', 'widget-head');
   const title = el('span', 'widget-title', def.title || def.id);
-  const controls = el('div', 'widget-controls');
-
-  const pinBtn = el('button', 'widget-pin', '⌖');
-  pinBtn.type = 'button';
-  pinBtn.setAttribute('aria-label', 'Przypnij');
-  pinBtn.addEventListener('click', () => togglePin(def.id));
-
-  const closeBtn = el('button', 'widget-close', '×');
-  closeBtn.type = 'button';
-  closeBtn.setAttribute('aria-label', 'Schowaj');
-  closeBtn.addEventListener('click', () => removeWidget(def.id, { toTrash: true }));
-
-  controls.append(pinBtn, closeBtn);
-  head.append(title, controls);
+  head.append(title);
 
   const body = el('div', 'widget-body');
   if (def.color) {
@@ -409,7 +405,7 @@ function runRender(entry) {
     });
   } catch (e) {
     console.error('[layout] widget render failed', entry.id, e);
-    entry.body.replaceChildren(el('div', '', '[GZOWO] Widget się wywalił.'));
+    entry.body.replaceChildren(el('div', '', 'Widget się wywalił.'));
   }
   cleanups.set(entry.node, typeof cleanup === 'function' ? cleanup : null);
   entry.cleanup = typeof cleanup === 'function' ? cleanup : null;
@@ -460,7 +456,7 @@ function pulse(node) {
   }).finished;
 }
 
-/** Animate a widget's center into #trash-target center, shrinking + fading. */
+/** Animate a widget's center into #trash-corner center, shrinking + fading. */
 function flyToTrash(node, delay = 0) {
   const target = trashPoint();
   const from = node.getBoundingClientRect();
@@ -476,19 +472,19 @@ function flyToTrash(node, delay = 0) {
   }).finished;
 }
 
-/** Center of #trash-target if present, else the dock's bottom-right corner. */
+/**
+ * Center of #trash-corner. The element is always in the DOM at its fixed
+ * bottom-right spot (base.css), and only its inner disc is animated (opacity +
+ * scale), so #trash-corner's own box stays stable and getBoundingClientRect is
+ * always valid. Falls back to the bottom-right viewport corner if it is missing.
+ */
 function trashPoint() {
   const t = document.getElementById(TRASH_ID);
   if (t) {
     const r = t.getBoundingClientRect();
     if (r.width || r.height) return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }
-  const dock = document.getElementById(DOCK_ID);
-  if (dock) {
-    const r = dock.getBoundingClientRect();
-    return { x: r.right - 28, y: r.top + r.height / 2 };
-  }
-  return { x: window.innerWidth - 28, y: window.innerHeight - METRICS.dockH / 2 };
+  return { x: window.innerWidth - 28, y: window.innerHeight - 28 };
 }
 
 // ============================================================================
@@ -550,11 +546,11 @@ function doReflow(opts = {}) {
 
   const ui = state.ui;
   const area = safeArea();
-  const { zone, visualR } = orbZone(ui, area);
+  const { zone, visualR } = avatarZone(ui, area);
 
-  // --- 1. Emit the orb slot first so the orb glides in parallel. -----------
+  // --- 1. Emit the avatar slot first so the avatar glides in parallel. ------
   if (zone) {
-    bus.emit('orb:slot', { cx: zone.cx, cy: zone.cy, r: visualR });
+    bus.emit('avatar:slot', { cx: zone.cx, cy: zone.cy, r: visualR });
   }
 
   // --- 2. Decide who is visible + their slots. -----------------------------
@@ -562,8 +558,9 @@ function doReflow(opts = {}) {
   let slots = [];
   let capped = false;
 
-  if (ui === 'intro') {
-    // No widget layout during intro — hide everything (should be empty anyway).
+  if (ui === 'auth' || ui === 'startup') {
+    // No widget layout during the auth gate or the startup reveal — hide
+    // everything (should be empty anyway; guards a stray registration).
     slots = [];
   } else if (ui === 'showing') {
     const res = computeShowingSlots(visible.length, area, zone);
@@ -580,7 +577,7 @@ function doReflow(opts = {}) {
 
   if (capped && overflow.length > 0) {
     bus.emit('toast', {
-      text: '[GZOWO] Za dużo widgetów, człowieku — coś musiało zejść.',
+      text: 'Za dużo widgetów naraz — część poczeka w kolejce.',
       kind: 'warn'
     });
   }
@@ -679,7 +676,7 @@ function hideEntry(entry) {
 }
 
 // ============================================================================
-// Debug assertion — pairwise overlap + orb clearance
+// Debug assertion — pairwise overlap + avatar clearance
 // ============================================================================
 function assertNoOverlap(zone) {
   const live = order
@@ -698,23 +695,8 @@ function assertNoOverlap(zone) {
       }
     }
     if (zone && intersects(rects[i].r, zone, -0.5)) {
-      console.error('[layout] OVERLAP (orb zone)', rects[i].id, rects[i].r, zone);
+      console.error('[layout] OVERLAP (avatar zone)', rects[i].id, rects[i].r, zone);
     }
-  }
-}
-
-// ============================================================================
-// Pin handling
-// ============================================================================
-function togglePin(id) {
-  const entry = widgets.get(id);
-  if (!entry) return;
-  const ui = state.ui;
-  if (ui !== 'idle' && ui !== 'talking' && ui !== 'showing') return;
-  if (entry.pinned.includes(ui)) {
-    unpin(id, [ui]);
-  } else {
-    pin(id, [ui]);
   }
 }
 
@@ -724,9 +706,9 @@ function togglePin(id) {
 let pendingReflowOpts = null;
 function scheduleReflow(opts) {
   // Merge coalesced opts within a frame. `enterNew` must be true if ANY pending
-  // caller wants it — otherwise a resize/setReservedRight reflow (enterNew:false)
-  // scheduled just before a widget-add (enterNew:true) would swallow the new
-  // widget's fly-in (last-write-loses).
+  // caller wants it — otherwise a resize reflow (enterNew:false) scheduled just
+  // before a widget-add (enterNew:true) would swallow the new widget's fly-in
+  // (last-write-loses).
   const enterNew = (opts && opts.enterNew === false) ? false : true;
   if (pendingReflowOpts) {
     pendingReflowOpts.enterNew = pendingReflowOpts.enterNew || enterNew;
@@ -747,11 +729,13 @@ function scheduleReflow(opts) {
 // State-change choreography
 // ============================================================================
 function onStateChange({ from, to }) {
-  if (to === 'intro') return; // never happens (state machine forbids), guard anyway
+  // Never happens (the state machine forbids re-entering the gate/reveal), but
+  // guard anyway: auth/startup have no widget layout.
+  if (to === 'auth' || to === 'startup') return;
 
   if (from === 'showing' && (to === 'idle' || to === 'talking')) {
     // showing → idle/talking: fly OUT all widgets not pinned for the target,
-    // then reflow survivors (which ring the now-centered orb).
+    // then reflow survivors (which ring the now-centered avatar).
     for (const id of order) {
       const entry = widgets.get(id);
       if (!entry) continue;
@@ -759,19 +743,20 @@ function onStateChange({ from, to }) {
         hideEntry(entry);
       }
     }
-    // Reflow (emits centered orb:slot; survivors glide into compact ring).
+    // Reflow (emits centered avatar:slot; survivors glide into compact ring).
     scheduleReflow();
     return;
   }
 
   if ((from === 'idle' || from === 'talking') && to === 'showing') {
-    // idle/talking → showing: emit the corner orb zone first (via reflow),
+    // idle/talking → showing: emit the corner avatar zone first (via reflow),
     // survivors glide, hidden-but-registered widgets fly in as grid fills.
     scheduleReflow();
     return;
   }
 
-  // idle <-> talking (orb stays centered): pins may differ per state → reflow.
+  // startup → idle, or idle <-> talking (avatar stays centered): pins may differ
+  // per state → reflow.
   scheduleReflow();
 }
 
@@ -800,17 +785,18 @@ async function init() {
   readTokens();
   bus.on('state:change', onStateChange);
   window.addEventListener('resize', onResize, { passive: true });
-  // If we boot straight into a non-intro state (or once intro hands off),
-  // an initial reflow will publish the orb slot. Do a first pass now so the
-  // orb has a target even before any widget exists.
+  // If we boot straight into a non-auth state (or once startup hands off), an
+  // initial reflow will publish the avatar slot. Do a first pass now so the
+  // avatar has a target even before any widget exists.
   scheduleReflow({ enterNew: false });
   console.info('[layout] engine ready');
 }
 
 /**
- * Add (or, on duplicate id, pulse) a widget. Returns its id.
- * If ui is not 'showing' and the def is not pinned for the current state,
- * defensively switch to 'showing' so the widget is actually visible.
+ * Add (or, on duplicate id, pulse) a widget. Returns its id. ASSISTANT-ONLY —
+ * the user never triggers this. If ui is idle/talking and the def is not pinned
+ * for the current state, defensively switch to 'showing' so it is actually
+ * visible.
  * @param {object} def frozen def from defineWidget()
  * @returns {string} id
  */
@@ -848,10 +834,11 @@ function addWidget(def) {
   order.push(def.id);
 
   // Defensive state switch: a non-pinned widget added while idle/talking would
-  // never be visible (compact ring shows pins only). Switch to showing.
+  // never be visible (compact ring shows pins only). Switch to showing. During
+  // auth/startup we never force a switch (the state machine forbids it anyway).
   const ui = state.ui;
   const pinnedHere = entry.pinned.includes(ui);
-  if (ui !== 'showing' && !pinnedHere && ui !== 'intro') {
+  if ((ui === 'idle' || ui === 'talking') && !pinnedHere) {
     state.setUI('showing', 'widget-added');
     // onStateChange schedules the reflow; but if the transition was rejected
     // (shouldn't be), fall back to scheduling here.
@@ -865,8 +852,10 @@ function addWidget(def) {
 }
 
 /**
- * Remove a widget: animate out (fly-out, or fly-to-trash if opts.toTrash),
- * then run its cleanup and drop it. Neighbors reflow into the freed space.
+ * Remove a widget: animate out (fly-out, or fly-to-trash if opts.toTrash), then
+ * run its cleanup and drop it. Neighbors reflow into the freed space.
+ * ASSISTANT-ONLY. When a VISIBLE widget flies to the trash we bracket it with
+ * 'trash:throw' (before) and 'trash:done' (after the finalize) + one trash sound.
  * @param {string} id
  * @param {{toTrash?:boolean}} [opts]
  */
@@ -890,9 +879,15 @@ function removeWidget(id, opts = {}) {
   };
 
   const wasVisible = entry.visible && entry.node.style.display !== 'none';
-  if (wasVisible) {
-    const out = toTrash ? flyToTrash(entry.node) : flyOut(entry.node);
-    out.then(finalize);
+  if (wasVisible && toTrash) {
+    bus.emit('trash:throw', { count: 1 });
+    bus.emit('sound:play', { name: 'trash' });
+    flyToTrash(entry.node).then(() => {
+      finalize();
+      bus.emit('trash:done', {});
+    });
+  } else if (wasVisible) {
+    flyOut(entry.node).then(finalize);
   } else {
     finalize();
   }
@@ -903,35 +898,56 @@ function removeWidget(id, opts = {}) {
 }
 
 /**
- * "Schowaj to": stagger all NON-pinned widgets to the trash (40ms apart),
- * play the trash sound once, then reflow survivors.
- * @param {{toTrash?:boolean}} [opts]
+ * "Schowaj to": stagger the victim widgets to the trash (40ms apart), play the
+ * trash sound + choreography events once, then reflow survivors. ASSISTANT-ONLY.
+ *
+ * @param {{toTrash?:boolean, all?:boolean}} [opts]
+ *   toTrash (default true) — fly to the trash vs plain fly-out.
+ *   all (default false)     — victims = EVERY registered widget (pinned too).
+ *                             When false, victims = widgets not pinned for the
+ *                             current UI state (v1 behavior).
+ * @returns {{hidden:number}} how many VISIBLE victims actually flew away.
  */
 function clear(opts = {}) {
   const toTrash = opts.toTrash !== false; // default true
+  const all = opts.all === true;
   const ui = state.ui;
 
-  // Victims = widgets not pinned for the current state (or all, if intro/none).
+  // Victims: every widget (all:true) or those not pinned for the current state.
   const victims = order
     .map((id) => widgets.get(id))
-    .filter((w) => w && !w.pinned.includes(ui));
+    .filter((w) => w && (all || !w.pinned.includes(ui)));
 
   if (victims.length === 0) {
     emitWidgets();
-    return;
+    return { hidden: 0 };
   }
 
-  if (toTrash) bus.emit('sound:play', { name: 'trash' });
+  // Count only victims actually on-screen — those are the ones that animate out.
+  const visibleVictims = victims.filter(
+    (w) => w.visible && w.node.style.display !== 'none'
+  );
+  const flying = toTrash && visibleVictims.length > 0;
 
-  let i = 0;
+  if (flying) {
+    // Pop the trash in BEFORE any node starts flying, and sound it once.
+    bus.emit('trash:throw', { count: visibleVictims.length });
+    bus.emit('sound:play', { name: 'trash' });
+  }
+
+  // Emit 'trash:done' after the LAST flying victim's finalize.
+  let pending = 0;
+  const onLanded = () => {
+    pending -= 1;
+    if (pending === 0 && flying) bus.emit('trash:done', {});
+  };
+
+  let visIndex = 0;
   for (const entry of victims) {
     // Drop from registries up-front so reflow ignores them.
     widgets.delete(entry.id);
     const oi = order.indexOf(entry.id);
     if (oi !== -1) order.splice(oi, 1);
-
-    const delay = i * MOTION.stagger;
-    i++;
 
     const finalize = () => {
       const clean = cleanups.get(entry.node);
@@ -943,10 +959,15 @@ function clear(opts = {}) {
     };
 
     const wasVisible = entry.visible && entry.node.style.display !== 'none';
-    if (wasVisible && toTrash) {
-      flyToTrash(entry.node, delay).then(finalize);
-    } else if (wasVisible) {
-      flyOut(entry.node, delay).then(finalize);
+    if (wasVisible) {
+      const delay = visIndex * MOTION.stagger;
+      visIndex += 1;
+      if (toTrash) {
+        pending += 1;
+        flyToTrash(entry.node, delay).then(() => { finalize(); onLanded(); });
+      } else {
+        flyOut(entry.node, delay).then(finalize);
+      }
     } else {
       finalize();
     }
@@ -954,11 +975,13 @@ function clear(opts = {}) {
 
   scheduleReflow();
   emitWidgets();
+  return { hidden: visibleVictims.length };
 }
 
 /**
  * Pin a widget for one or more UI states. Pinned widgets survive
  * showing→idle/talking transitions and appear in the compact ring.
+ * ASSISTANT-ONLY.
  * @param {string} id
  * @param {string[]} uiStates subset of ['idle','talking','showing']
  */
@@ -972,15 +995,13 @@ function pin(id, uiStates) {
   }
   if (changed) {
     entry.node.classList.add('is-pinned');
-    const pinBtn = entry.node.querySelector('.widget-pin');
-    if (pinBtn) pinBtn.setAttribute('aria-label', 'Odepnij');
     scheduleReflow();
     emitWidgets();
   }
 }
 
 /**
- * Unpin a widget from given states (or all states if omitted).
+ * Unpin a widget from given states (or all states if omitted). ASSISTANT-ONLY.
  * @param {string} id
  * @param {string[]} [uiStates]
  */
@@ -994,8 +1015,6 @@ function unpin(id, uiStates) {
   }
   if (entry.pinned.length === 0) {
     entry.node.classList.remove('is-pinned');
-    const pinBtn = entry.node.querySelector('.widget-pin');
-    if (pinBtn) pinBtn.setAttribute('aria-label', 'Przypnij');
   }
   scheduleReflow();
   emitWidgets();
@@ -1007,14 +1026,6 @@ function getWidgets() {
     const w = widgets.get(id);
     return { id: w.id, pinned: [...w.pinned], title: w.def.title };
   });
-}
-
-/** Chat panel opens/closes → shrink the field from the right, reflow. */
-function setReservedRight(pxVal) {
-  const next = Math.max(0, Number(pxVal) || 0);
-  if (next === reservedRight) return;
-  reservedRight = next;
-  scheduleReflow({ enterNew: false });
 }
 
 /** Recompute slots for the current state + viewport and animate. Public hook. */
@@ -1030,7 +1041,7 @@ function emitWidgets() {
 }
 
 // ============================================================================
-// Export
+// Export — the assistant-only positioning API (no user-facing manipulation).
 // ============================================================================
 export const layout = {
   init,
@@ -1040,6 +1051,5 @@ export const layout = {
   pin,
   unpin,
   getWidgets,
-  setReservedRight,
   reflow
 };

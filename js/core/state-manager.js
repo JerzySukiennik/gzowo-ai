@@ -5,12 +5,15 @@
 import { bus } from './event-bus.js';
 
 // ---- UI state machine -------------------------------------------------------
-// States: 'intro' | 'idle' | 'talking' | 'showing'
+// States: 'auth' | 'startup' | 'idle' | 'talking' | 'showing'
 // Transitions:
-//   intro   -> idle only (boot handoff)
+//   auth    -> startup only  (login / register / session-restore ok)
+//   startup -> idle only     (reveal choreography done)
 //   idle <-> talking <-> showing  (freely interchangeable)
+//   nothing ever returns to auth or startup (logout = custom-auth.logout() -> reload)
 // Same-state or invalid transitions are ignored with a console.warn.
-const UI_STATES = ['intro', 'idle', 'talking', 'showing'];
+const UI_STATES = ['auth', 'startup', 'idle', 'talking', 'showing'];
+const LIVE_STATES = ['idle', 'talking', 'showing'];
 
 /**
  * @param {string} from
@@ -20,10 +23,12 @@ const UI_STATES = ['intro', 'idle', 'talking', 'showing'];
 function isValidTransition(from, to) {
   if (!UI_STATES.includes(to)) return false;
   if (from === to) return false;
-  if (from === 'intro') return to === 'idle';          // intro escapes only to idle
-  if (to === 'intro') return false;                     // nothing returns to intro
-  // idle / talking / showing are freely interchangeable
-  return ['idle', 'talking', 'showing'].includes(from);
+  if (from === 'auth') return to === 'startup';          // auth escapes only into startup
+  if (from === 'startup') return to === 'idle';          // startup reveals only into idle
+  // from is a live state now — idle/talking/showing are freely interchangeable,
+  // and this branch structurally forbids any return to 'auth'/'startup' (they are
+  // not in LIVE_STATES), so nothing ever re-enters the gate or the reveal.
+  return LIVE_STATES.includes(from) && LIVE_STATES.includes(to);
 }
 
 // ---- Shallow store defaults -------------------------------------------------
@@ -31,28 +36,32 @@ const STORE_DEFAULTS = {
   theme: 'mono',                                  // 'mono' | 'blueprint'
   mode: { input: 'voice', output: 'voice' },      // conversation mode matrix
   muted: false,
-  wakeEnabled: false,
-  user: null,
-  demo: false,
+  wakeEnabled: false,                             // user preference for 'hej gzowo'
+  wakeAvailable: false,                           // wake stack actually reachable
+  wakeModelStatus: 'idle',                        // 'idle' | 'loading' | 'ready' | 'unavailable'
+  user: null,                                     // {username} after auth
+  authResolved: false,
   bridgeOnline: false,
   voiceStatus: 'off',
-  chatOpen: false
+  settingsOpen: false,
+  skills: []                                      // enabled skill ids
 };
 
-let _ui = 'intro';
+let _ui = 'auth';
 const store = { ...STORE_DEFAULTS };
 /** @type {Map<string, Set<Function>>} */
 const subscribers = new Map();
 
 export const state = {
-  /** @returns {'intro'|'idle'|'talking'|'showing'} */
+  /** @returns {'auth'|'startup'|'idle'|'talking'|'showing'} */
   get ui() {
     return _ui;
   },
 
   /**
    * Transition the UI state machine. Validates, updates body dataset, emits.
-   * @param {'intro'|'idle'|'talking'|'showing'} next
+   * The ONLY writer of document.body.dataset.ui and emitter of 'state:change'.
+   * @param {'auth'|'startup'|'idle'|'talking'|'showing'} next
    * @param {string} [reason]
    */
   setUI(next, reason = '') {

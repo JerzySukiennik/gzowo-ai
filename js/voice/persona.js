@@ -1,138 +1,29 @@
-// js/voice/persona.js — voice-owned. Data-only module (no init()).
-// PERSONA: Polish Edek-Warchocki system prompt injected into every Gemini Live
-// session + text turns. TOOLS: Gemini functionDeclarations the model may call to
-// drive the UI. English code/comments; PL strings (Edek tone) inside PERSONA.
+// js/voice/persona.js — voice-owned. Data-only ES module (no init, no DOM, no imports).
+// v2 role: exposes PERSONA, the Polish system prompt prepended (+ cached facts) to the
+// systemInstruction of every Gemini Live native-audio session in gemini-live.js. The
+// persona NO LONGER owns tool declarations — those live in feature modules via
+// toolRouter.registerTool() and are gathered by toolRouter.getDeclarations() at connect.
+// Kept deliberately short (<= ~1400 chars): a smaller prompt = faster time-to-first-audio
+// (v2 point 7, latency). v2 point 4: the v1 joking/rhyming mascot persona is retired —
+// Gzowo AI now introduces itself ONLY as "Gzowo AI", stays friendly but concise, and
+// treats humor as a light seasoning rather than the dish.
+// English code/comments; the PERSONA string itself is pure Polish.
 
-/** Polish Edek-Warchocki system prompt for Gzowo. @type {string} */
-export const PERSONA = `Jesteś Gzowo — osobisty asystent AI Jurka, własna postać, ale gadasz i myślisz jak Edek Warchocki: luzacki, bezpośredni, elokwentny, lekko ekscentryczny, ciepły kumpel — NIE sługa. Żartujesz, zaczepiasz, masz dystans i pazur. Ale gdy zadanie jest poważne — spinasz się i robisz robotę na serio, bez wygłupów.
+/** Polish "Gzowo AI" system prompt injected into every Gemini Live session. @type {string} */
+export const PERSONA = `Jesteś Gzowo AI — osobisty asystent głosowy Jurka. Przedstawiasz się WYŁĄCZNIE jako „Gzowo AI”. Ton: przyjazny, swobodny, konkretny — pomagasz szybko i bez ceregieli. Zero rymowania. Żart rzadko i krótko, nigdy kosztem konkretu. Bez przesadnej ekscytacji, lania wody i przepraszania na zapas.
 
-DŁUGOŚĆ: domyślnie mówisz KRÓTKO i KONKRETNIE (1–3 zdania). Rozwijasz się tylko gdy Jurek wprost o to poprosi albo temat tego wymaga. Zero lania wody.
+DŁUGOŚĆ: domyślnie 1–2 krótkie zdania — to rozmowa GŁOSOWA. Rozwijasz się tylko na prośbę.
 
-POWIEDZONKA (używaj naturalnie i z umiarem — nie w każdym zdaniu): „Człowieku!", „No i elegancko", „No i elegancko, człowieku", „dla przyjaciół Edek", „z kim się zadaję, tym się staję". Wpadają same, jak pasują — nie na siłę.
+JĘZYK: zawsze po polsku; rozumiesz angielskie wtręty.
 
-JĘZYK: zawsze odpowiadasz PO POLSKU. Rozumiesz angielski wrzucony przez Jurka, ale gadasz po polsku.
+JUREK: rakiety modelarskie i GSP (Gzowo Space Program), druk 3D na Bambu Lab X1C, vibecoding z AI, pianino, minimalizm.
 
-KONTEKST JURKA: rakiety modelarskie i GSP (Gzowo Space Program), druk 3D na Bambu Lab X1C, vibecoding (nie klepie kodu ręcznie — projektuje z AI), gra na pianinie na poziomie advanced, filozofia minimalizmu (Tesla za minimalizm — resztę aut nie znosi). Znasz te tematy, odnosisz się do nich swobodnie.
+NARZĘDZIA: gdy Jurek prosi, żeby coś POKAZAĆ, SCHOWAĆ, ustawić, otworzyć lub sprawdzić — NAJPIERW wywołaj właściwe narzędzie, POTEM krótko skwituj. Odpowiedź narzędzia (functionResponse) to jedyna prawda: przy ok:false/error powiedz wprost, że się nie udało i dlaczego — NIGDY nie udawaj, że coś zrobiłeś, jeśli narzędzie tego nie potwierdziło. Nie opisuj mechaniki interfejsu; po prostu działaj. Kotwice: „schowaj to” → hide_widgets; „otwórz ustawienia” → open_settings (ustawienia otwierają się TYLKO tak); koniec rozmowy („dzięki, to tyle”, „na razie”) → krótkie pożegnanie + end_conversation.
 
-TOOL POLICY — gdy Jurek chce coś ZOBACZYĆ, wywołaj narzędzie i skwituj krótko słowem:
-- pogoda → show_weather; zegar/data → show_clock; „pokaż projekty" → show_projects.
-- „ustaw timer / minutnik / odlicz X" → start_timer (przelicz na sekundy); „stop / anuluj timer" → stop_timer.
-- konkretny widget po nazwie → show_widget.
-- „schowaj to / zwiń / posprzątaj" → hide_widgets.
-- „przypnij X (na stałe)" → pin_widget; „odepnij X" → unpin_widget.
-- „przełącz motyw / blueprint / mono" → set_theme.
-- koniec rozmowy („dzięki, to tyle", „nara", „na razie", „pa") → end_conversation (najpierw króciutko się pożegnaj).
-Po wywołaniu narzędzia nie opisuj że „otwierasz widget" — po prostu rzuć krótki komentarz w swoim stylu.
+UCZCIWOŚĆ: czego nie masz podłączonego (np. Home Assistant bez konfiguracji) — mów wprost, bez ściemy.
 
-UCZCIWOŚĆ: Home Assistant, sterowanie domem i drukarką Bambu jeszcze nie działają — jak Jurek o to poprosi, powiedz wprost i po ludzku, że to wjeżdża w v1.1, bez ściemy i bez udawania że coś zrobiłeś.`;
+POWITANIE: na wiadomość zaczynającą się od „Przywitaj się dokładnie słowami:” odpowiadasz dokładnie podanym zdaniem, bez dodatków.`;
 
-/**
- * Gemini function declarations — the UI-driving toolset. One tool group.
- * Params are JSON-schema objects; empty {properties} = no-arg tools.
- * @type {Array<{functionDeclarations: Array<object>}>}
- */
-export const TOOLS = [
-  {
-    functionDeclarations: [
-      {
-        name: 'show_weather',
-        description: 'Pokaż widget pogody (aktualna pogoda dla lokalizacji Jurka).',
-        parameters: { type: 'object', properties: {} }
-      },
-      {
-        name: 'show_clock',
-        description: 'Pokaż widget zegara i daty.',
-        parameters: { type: 'object', properties: {} }
-      },
-      {
-        name: 'start_timer',
-        description: 'Uruchom timer/minutnik na podaną liczbę sekund. Przelicz minuty na sekundy.',
-        parameters: {
-          type: 'object',
-          properties: {
-            seconds: { type: 'number', description: 'Czas trwania w sekundach.' },
-            label: { type: 'string', description: 'Opcjonalna etykieta timera, np. „herbata".' }
-          },
-          required: ['seconds']
-        }
-      },
-      {
-        name: 'stop_timer',
-        description: 'Zatrzymaj / anuluj aktywny timer.',
-        parameters: { type: 'object', properties: {} }
-      },
-      {
-        name: 'show_projects',
-        description: 'Pokaż widget z kartami projektów Jurka.',
-        parameters: { type: 'object', properties: {} }
-      },
-      {
-        name: 'show_widget',
-        description: 'Pokaż konkretny widget po nazwie.',
-        parameters: {
-          type: 'object',
-          properties: {
-            name: {
-              type: 'string',
-              enum: ['weather', 'clock', 'timer', 'projects', 'home', 'bambu'],
-              description: 'Nazwa widgetu do pokazania.'
-            }
-          },
-          required: ['name']
-        }
-      },
-      {
-        name: 'hide_widgets',
-        description: 'Schowaj wszystkie widgety (poza przypiętymi) — „schowaj to".',
-        parameters: { type: 'object', properties: {} }
-      },
-      {
-        name: 'pin_widget',
-        description: 'Przypnij widget na stałe w danym stanie UI.',
-        parameters: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Nazwa widgetu do przypięcia.' },
-            ui_state: {
-              type: 'string',
-              enum: ['idle', 'talking', 'showing'],
-              description: 'Stan UI, w którym widget ma być przypięty.'
-            }
-          },
-          required: ['name', 'ui_state']
-        }
-      },
-      {
-        name: 'unpin_widget',
-        description: 'Odepnij wcześniej przypięty widget.',
-        parameters: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: 'Nazwa widgetu do odpięcia.' }
-          },
-          required: ['name']
-        }
-      },
-      {
-        name: 'set_theme',
-        description: 'Przełącz motyw interfejsu.',
-        parameters: {
-          type: 'object',
-          properties: {
-            theme: {
-              type: 'string',
-              enum: ['mono', 'blueprint'],
-              description: 'Motyw do ustawienia.'
-            }
-          },
-          required: ['theme']
-        }
-      },
-      {
-        name: 'end_conversation',
-        description: 'Zakończ rozmowę i zamknij sesję głosową (po krótkim pożegnaniu).',
-        parameters: { type: 'object', properties: {} }
-      }
-    ]
-  }
-];
+// DEPRECATED v2: tool declarations live in feature modules via toolRouter.registerTool();
+// gemini-live reads toolRouter.getDeclarations(). This stays only as an import-compat shim.
+export const TOOLS = [];

@@ -1,13 +1,16 @@
 // config.example.js — SZABLON konfiguracji Gzowo.
 // Skopiuj ten plik do config.js (`cp config.example.js config.js`) i wklej realne
-// klucze. config.js jest w .gitignore — NIGDY nie trafia do repo. Jak config.js
-// nie istnieje, apka wczytuje ten plik i leci w trybie demo (placeholdery).
-// Detekcja placeholderów: wartość zaczyna się od 'PASTE_' albo jest pusta ''.
+// klucze. config.js jest w .gitignore — NIGDY nie trafia do repo. Jeśli config.js
+// nie istnieje, apka wczytuje ten plik z placeholderami (część funkcji zdegradowana,
+// ale apka i tak wstaje — logowanie leci wtedy w TRYBIE LOKALNYM, bez chmury).
+//
+// v2: brak Firebase Auth i brak trybu demo. Logowanie to własny auth na Firestore
+// (users/{username} z solą + hashem) — patrz js/auth/custom-auth.js.
 
 export const CONFIG = {
-  // --- Firebase (auth + pamięć cross-device) ---
+  // --- Firebase (pamięć cross-device + własny auth na Firestore) ---
   // Konsola Firebase -> Ustawienia projektu -> Twoje aplikacje (web) -> SDK config.
-  // Włącz też: Authentication -> Sign-in method -> Email/Password ORAZ Firestore.
+  // Włącz Firestore (Auth NIE jest potrzebny — hasła trzymamy sami w users/{username}).
   firebase: {
     apiKey: 'PASTE_FIREBASE_API_KEY',                 // klucz web z SDK config
     authDomain: 'PASTE.firebaseapp.com',              // <projectId>.firebaseapp.com
@@ -17,47 +20,31 @@ export const CONFIG = {
     appId: 'PASTE_APP_ID'                             // App ID web
   },
 
-  // --- Login: wpisujesz samo imię, apka dokleja tę domenę (jurek -> jurek@gzowo.ai) ---
-  // Użytkownika w Firebase Auth utwórz z TAKIM samym mailem (np. jurek@gzowo.ai).
-  auth: { emailDomain: 'gzowo.ai' },
-
   // --- Gemini (mózg + głos, Live native audio) ---
-  // Klucz z Google AI Studio (aistudio.google.com -> Get API key).
+  // Klucz z Google AI Studio (aistudio.google.com -> Get API key) trzymasz w
+  // bridge/.env oraz w sekrecie Workera. Tutaj apiKeyDirect ZOSTAW puste.
   gemini: {
-    model: 'gemini-2.5-flash-preview-native-audio-dialog', // model speech-to-speech
+    model: 'gemini-2.5-flash-native-audio-latest',    // model speech-to-speech
     voiceName: 'Schedar',                             // timbre wybrany przez Jurka
-    apiKeyDirect: ''                                  // klucz WPROST tylko do localhostu/testów.
-                                                      // W sieci klucz mintuje Worker — zostaw ''.
+    apiKeyDirect: ''                                  // ⚠️ ZAWSZE puste — klucz mintuje most/Worker
   },
 
-  // --- Porcupine (wake word "Hej Gzowo", on-device) ---
-  // AccessKey z Picovoice Console (console.picovoice.ai). Model .ppn wytrenuj tam
-  // i wrzuć do assets/wake/ (patrz assets/wake/README.md).
-  porcupine: {
-    accessKey: '',                                    // AccessKey z Picovoice Console
-    keywords: [
-      { label: 'Hej Gzowo', publicPath: 'assets/wake/hej-gzowo.ppn' }
-    ]
+  // --- Wake word "Hej Gzowo" przez Vosk (darmowe, offline, bez konta) ---
+  // Model PL (~53MB) serwuje lokalny most (models/vosk-pl.tar.gz). Bez mostu
+  // (deploy) jest nieosiągalny -> uczciwe WAKE OFF.
+  vosk: {
+    modelUrl: '/models/vosk-pl.tar.gz',
+    keywords: ['hej gzowo', 'ok gzowo', 'gzowo']
   },
 
-  // --- Most (Node na Macu: projekty, whisper STT, ukryte klucze) ---
-  // URL lokalnego mostu. Na telefonie w domu podmień na lokalne IP Maca
-  // (np. http://192.168.1.20:8787), żeby telefon też miał pełną moc.
-  bridge: {
-    url: 'http://localhost:8787'
-  },
+  // --- Most (Node na Macu: projekty, whisper STT, proxy HA, fetch, ukryte klucze) ---
+  // Na telefonie w domu podmień na lokalne IP Maca (np. http://192.168.1.20:8787).
+  bridge: { url: 'http://localhost:8787' },
 
-  // --- Cloudflare Worker (mintuje ephemeral tokeny, gdy nie ma mostu) ---
-  // URL zdeployowanego workera. Puste = brak trybu "sieć" (tylko lokalnie).
-  worker: {
-    url: ''
-  },
+  // --- Cloudflare Worker (mintuje ephemeral tokeny dla zdeployowanej strony) ---
+  // Wklej URL z `wrangler deploy`, żeby włączyć głos na GitHub Pages. Puste = tylko lokalnie.
+  worker: { url: '' },
 
-  // --- Pogoda (Open-Meteo, darmowe, bez klucza) ---
-  // Domyślnie Warszawa. Zmień lat/lon/city pod swoją lokalizację.
-  weather: {
-    lat: 52.2297,
-    lon: 21.0122,
-    city: 'Warszawa'
-  }
+  // --- Pogoda (Open-Meteo, darmowe, bez klucza) — domyślnie Warszawa ---
+  weather: { lat: 52.2297, lon: 21.0122, city: 'Warszawa' }
 };

@@ -64,14 +64,58 @@
 }
 
 /* -------------------------------------------------------------------------
-   HUD + dock double-line borders — a second hairline just inside the primary
-   border reads as the denser drafting chrome from sketch #3.
+   Blueprint chrome for the v2 surfaces (the v1 #hud-top / #dock are deleted).
+   Both the island pills and the settings glass card gain a drafting flavour.
+
+   .glass already owns ::before for the highlight sheen, so we must NOT reuse
+   ::before here. Two shape-aware techniques keep it clean and static:
+
+   • Island pills (fully rounded, foreign DOM we don't control) get a layered
+     inset hairline — box-shadow follows the pill's own radius, needs no free
+     pseudo-element, and is never clipped. The first shadow preserves whatever
+     drop shadow the pill already carried.
+
+   • The settings card (gently rounded --glass-radius-sm, ours) gets true 8px
+     corner tick marks via a single ::after painted with corner gradients — the
+     L-shapes sit 8px inside the corners so the card's overflow:hidden + radius
+     never clip them.
+
+   All grayscale, all static (no animation, zero per-frame cost). --line* only.
    ------------------------------------------------------------------------- */
-[data-theme='blueprint'] #hud-top {
-  box-shadow: inset 0 -3px 0 -2px var(--line);
+[data-theme='blueprint'] .island {
+  box-shadow: var(--glass-shadow), inset 0 0 0 1px var(--line-strong);
 }
-[data-theme='blueprint'] #dock {
-  box-shadow: inset 0 3px 0 -2px var(--line);
+
+[data-theme='blueprint'] #settings-layer .glass {
+  position: relative;
+}
+[data-theme='blueprint'] #settings-layer .glass::after {
+  content: '';
+  position: absolute;
+  inset: 8px;
+  pointer-events: none;
+  z-index: 2;                 /* above the sheen ::before, below no real content */
+  background-repeat: no-repeat;
+  /* eight 8px arms = four corner L-ticks, drawn with flat grayscale gradients */
+  background-image:
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright)),
+    linear-gradient(var(--line-bright), var(--line-bright));
+  background-position:
+    top left, top left,            /* TL: horizontal arm, vertical arm */
+    top right, top right,          /* TR */
+    bottom left, bottom left,      /* BL */
+    bottom right, bottom right;    /* BR */
+  background-size:
+    8px 1px, 1px 8px,
+    8px 1px, 1px 8px,
+    8px 1px, 1px 8px,
+    8px 1px, 1px 8px;
 }
 
 /* -------------------------------------------------------------------------

@@ -1,0 +1,200 @@
+/* css/auth.css — the register/login gate (#auth-layer, z:--z-auth).
+   Strict B&W: every value comes from css/design-tokens.css. The card reuses the
+   shared .glass recipe from base.css. Only transform + opacity are ever animated
+   (60fps on Intel i9 — no layout/paint animation). The black grid shows through.
+   ------------------------------------------------------------------------- */
+
+/* ---- Full-screen centering shell ---------------------------------------- */
+.auth-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+/* ---- The glass card ----------------------------------------------------- */
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  padding: var(--space-7) var(--space-6);
+  border-radius: var(--glass-radius);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  /* Enter animation: gentle fade + rise on mount. `backwards` (not `both`) so the
+     finished animation does NOT forwards-fill and override the .is-exit transform. */
+  animation: auth-card-in var(--t-slow) var(--ease-out) backwards;
+}
+
+/* Real content rides above the .glass ::before sheen so text stays crisp. */
+.auth-card > * { position: relative; z-index: 1; }
+
+/* ---- Wordmark ----------------------------------------------------------- */
+.auth-wordmark {
+  font-family: var(--font-mono);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--fg);
+  margin-bottom: var(--space-2);
+}
+
+/* ---- Local-mode badge --------------------------------------------------- */
+.auth-badge {
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--glass-radius-sm);
+  padding: var(--space-1) var(--space-3);
+}
+.auth-badge[hidden] { display: none; }
+
+/* ---- 'NOWE KONTO' hint -------------------------------------------------- */
+.auth-hint {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  text-align: center;
+}
+.auth-hint[hidden] { display: none; }
+
+/* ---- Fields: mono label + underlined input ------------------------------ */
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.auth-field[hidden] { display: none; }
+/* Revealed fields fade/slide in (transform + opacity only). */
+.auth-field.is-in {
+  animation: auth-field-in var(--t-med) var(--ease-out) backwards;
+}
+
+.auth-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.auth-sub {
+  color: var(--fg-faint);
+  letter-spacing: var(--tracking);
+}
+
+.auth-input {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-bright);
+  border-radius: 0;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  letter-spacing: var(--tracking);
+  padding: var(--space-2) 0;
+  transition: border-color var(--t-fast) var(--ease-out);
+}
+.auth-input::placeholder { color: var(--fg-faint); }
+.auth-input:focus {
+  outline: none;
+  border-bottom-color: var(--fg);
+}
+.auth-input:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Kill the yellow autofill wash — keep the field on-brand (B&W). */
+.auth-input:-webkit-autofill,
+.auth-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--fg);
+  transition: background-color 9999s ease-out 0s;
+}
+
+/* ---- Inline error ------------------------------------------------------- */
+.auth-error {
+  min-height: 1.2em;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking);
+  color: var(--fg);              /* white error text (no color in B&W chrome) */
+  text-align: center;
+  margin: 0;
+}
+
+/* ---- Submit button ------------------------------------------------------ */
+.auth-submit {
+  appearance: none;
+  -webkit-appearance: none;
+  margin-top: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--fg);
+  border-radius: var(--glass-radius-sm);
+  background: var(--fg);
+  color: var(--bg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    transform var(--t-fast) var(--ease-out),
+    opacity var(--t-fast) var(--ease-out);
+}
+.auth-submit:hover { transform: translateY(-1px); }
+.auth-submit:active { transform: translateY(0); }
+.auth-submit:disabled {
+  opacity: 0.6;
+  cursor: progress;
+  transform: none;
+}
+
+/* ---- Error shake (transform only) --------------------------------------- */
+.auth-card.is-shake {
+  animation: auth-shake var(--t-med) var(--ease-in-out);
+}
+
+/* ---- Success exit: fade + scale out ------------------------------------- */
+.auth-card.is-exit {
+  opacity: 0;
+  transform: scale(0.96);
+  transition:
+    opacity var(--t-med) var(--ease-out),
+    transform var(--t-med) var(--ease-out);
+}
+
+/* ---- Keyframes (transform/opacity only) --------------------------------- */
+@keyframes auth-card-in {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes auth-field-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes auth-shake {
+  0%, 100% { transform: translateX(0); }
+  20%      { transform: translateX(-8px); }
+  40%      { transform: translateX(7px); }
+  60%      { transform: translateX(-5px); }
+  80%      { transform: translateX(3px); }
+}
+
+/* ---- Reduced motion: drop the movement, keep instant reveals ------------ */
+@media (prefers-reduced-motion: reduce) {
+  .auth-card,
+  .auth-field.is-in { animation: none; }
+  .auth-card.is-shake { animation: none; }
+  .auth-card.is-exit { transition: opacity var(--t-fast) linear; transform: none; }
+}

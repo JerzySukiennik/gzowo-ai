@@ -4,26 +4,45 @@
 // the public control surface (voice:toggle / voice:wake / chat:send / mode:change).
 //
 // GLOBAL RULES honored here: logic only (no DOM/color); English comments, PL toasts
-// in Edek tone; secrets only via CONFIG/bridge; every failure path = honest toast,
-// never fake; one AudioWorklet, reused buffers in hot paths (no per-frame allocs).
+// in a friendly, concise v2 tone (no rhymes/catchphrases); secrets only via
+// CONFIG/bridge; every failure path = honest toast, never fake; one AudioWorklet,
+// reused buffers in hot paths (no per-frame allocs).
+//
+// v2 deltas (this file): tools now go through the shared tool-router with REAL
+// functionResponses (bug 9 fix); connect() awaits no network for facts/token
+// beyond a single cached-or-fresh token resolve (latency); a startup greeting is
+// spoken through the Live session; the GoogleGenAI client is rebuilt per connect
+// whenever it was minted from a single-use ephemeral token.
 
 import { GoogleGenAI, Modality } from '@google/genai';
 import { bus } from '../core/event-bus.js';
 import { state } from '../core/state-manager.js';
 import { bridgeClient } from '../bridge-client.js';
 import { memory } from '../memory/firebase.js';
-import { PERSONA, TOOLS } from './persona.js';
+import { toolRouter } from '../core/tool-router.js';
+import { PERSONA } from './persona.js';
 
 const CONFIG = window.GZOWO_CONFIG;
 
 // ---- Module singletons ------------------------------------------------------
 let ai = null;                 // GoogleGenAI instance
+let aiIsDirectKey = false;     // true only when `ai` was built from a durable direct
+                               // key (safe to reuse). Ephemeral-token clients are
+                               // single-use (uses:1) and rebuilt every connect.
 let session = null;            // active Live session
 let sessionEpoch = 0;          // bumped per connect; callbacks ignore stale epochs
 let connecting = false;        // guard against concurrent connects
 let resumptionHandle = null;   // last session resumption handle (RAM only)
 let retriedOnce = false;       // one auto-retry budget per unexpected drop
 let goAwayTimer = null;        // scheduled transparent reconnect timer
+let pendingGreet = null;       // one-shot username to greet on the next open
+
+// ---- Token prefetch cache ---------------------------------------------------
+// Bridge/worker mint SINGLE-USE ephemeral tokens with a ~2-minute new-session
+// window. We warm one on 'auth:ready' (and after every teardown) so the startup
+// greeting session skips a full token round-trip. Reuse only if still fresh.
+let tokenCache = null;         // { auth:{token}|{apiKey}, mintedAt:number } | null
+const TOKEN_TTL_MS = 100000;   // reuse a cached token only if minted < 100s ago
 
 // ---- Audio IN (mic -> PCM16 -> Gemini) --------------------------------------
 let inCtx = null;              // AudioContext @16k
@@ -62,8 +81,28 @@ export async function init() {
     bus.on('voice:wake', onWake);
     bus.on('chat:send', onChatSend);
     bus.on('mode:change', onModeChange);
+    bus.on('startup:greet', onStartupGreet);
     // Reflect mute changes onto the output gain in real time.
     unsubMuted = state.subscribe('muted', applyMute);
+
+    // Register the local session-lifecycle tool with the shared router so the
+    // model ends the conversation through the SAME dispatch path as every other
+    // tool (real functionResponse), keeping the graceful-end behavior of v1.
+    toolRouter.registerTool(
+      {
+        name: 'end_conversation',
+        description: 'Zakończ rozmowę głosową (wywołaj po krótkim pożegnaniu).',
+        parameters: { type: 'object', properties: {} }
+      },
+      async () => { scheduleGracefulEnd(); return { ok: true }; }
+    );
+
+    // Latency: warm a Gemini token the moment the user is authed, so the startup
+    // greeting session (which fires seconds later) usually skips the token round-
+    // trip. Per contract 'auth:ready' always lands after 'boot:done'; also cover a
+    // late/hot-reload subscribe by checking whether a user is already present.
+    bus.on('auth:ready', () => { prefetchToken(); });
+    if (state.get('user')) prefetchToken();
   } catch (err) {
     console.error('[gemini-live] init failed', err);
   }
@@ -74,22 +113,58 @@ export async function init() {
 // ============================================================================
 
 /**
- * Resolve credentials and build the GoogleGenAI client.
+ * Warm a Gemini token in the background and cache it. Silent on failure — the
+ * next connect() simply fetches fresh. Never throws.
+ */
+async function prefetchToken() {
+  try {
+    const auth = await bridgeClient.getToken();
+    if (auth && (auth.token || auth.apiKey)) {
+      tokenCache = { auth, mintedAt: Date.now() };
+    }
+  } catch (_e) {
+    /* silent — connect() falls back to a fresh fetch */
+  }
+}
+
+/**
+ * Resolve credentials for the session about to open: reuse the prefetched token
+ * if it is still fresh (within the ephemeral single-session window), otherwise
+ * fetch a new one. Always clears the cache after handing a token out — ephemeral
+ * tokens are uses:1 and must never be replayed. Never throws.
+ * @returns {Promise<{token:string}|{apiKey:string}|null>}
+ */
+async function resolveAuth() {
+  if (tokenCache && (Date.now() - tokenCache.mintedAt) < TOKEN_TTL_MS) {
+    const auth = tokenCache.auth;
+    tokenCache = null; // single-use: consume it
+    return auth;
+  }
+  tokenCache = null;   // stale (or empty) — drop and fetch fresh
+  try {
+    return await bridgeClient.getToken();
+  } catch (_e) {
+    return null; // bridge/worker unreachable — caller degrades to direct key / off
+  }
+}
+
+/**
+ * Resolve credentials and build the GoogleGenAI client. Reuses `ai` ONLY when it
+ * was built from a durable direct key; ephemeral-token clients (uses:1) are
+ * rebuilt every connect. Never throws.
  * @returns {Promise<boolean>} true if a client is ready, false if honestly off.
  */
 async function ensureClient() {
-  if (ai) return true;
+  // Durable direct-key client is safe to keep across sessions.
+  if (ai && aiIsDirectKey) return true;
 
-  let auth = null;
-  try {
-    auth = await bridgeClient.getToken();
-  } catch (_e) {
-    auth = null; // bridge/worker unreachable — fall through to direct key / off
-  }
+  const auth = await resolveAuth();
 
   // Preferred: ephemeral token minted by bridge/worker (key never in browser).
+  // Single-use -> build a FRESH client every connect; never mark it reusable.
   if (auth && auth.token) {
     ai = new GoogleGenAI({ apiKey: auth.token, httpOptions: { apiVersion: 'v1alpha' } });
+    aiIsDirectKey = false;
     return true;
   }
 
@@ -100,17 +175,20 @@ async function ensureClient() {
     '';
   if (directKey) {
     bus.emit('toast', {
-      text: 'Lecę na gołym kluczu (dev) — do sieci tylko przez Workera.',
+      text: 'Działam na kluczu deweloperskim — na produkcji użyj Workera.',
       kind: 'warn'
     });
     ai = new GoogleGenAI({ apiKey: directKey, httpOptions: { apiVersion: 'v1alpha' } });
+    aiIsDirectKey = true;
     return true;
   }
 
   // Honest off — no key anywhere. Do not fake a session.
+  ai = null;
+  aiIsDirectKey = false;
   setStatus('off');
   bus.emit('toast', {
-    text: 'Głos niedostępny — brak klucza. Uzupełnij config.js albo odpal most.',
+    text: 'Głos niedostępny — brak klucza. Uruchom most albo uzupełnij config.js.',
     kind: 'warn'
   });
   return false;
@@ -118,29 +196,33 @@ async function ensureClient() {
 
 /**
  * Open (or reopen) the single Live session. Optionally resume via handle.
- * @param {{handle?: string}} [opts]
+ * @param {{handle?: string, greet?: string}} [opts]
  */
 async function connect(opts = {}) {
   if (session || connecting) return;
   connecting = true;
+  // One-shot greeting for THIS open only (consumed in handleOpen). Reconnects and
+  // reopens pass no greet, so the greeting never repeats.
+  pendingGreet = opts.greet || null;
   // New epoch: any callback from a previously-torn-down session is now stale
   // and will be ignored, which kills the deliberate-close vs auto-retry race.
   const epoch = ++sessionEpoch;
   setStatus('connecting');
 
+  // Latency: this is the ONLY awaited network call before ai.live.connect (and it
+  // usually resolves from the prefetch cache without a round-trip).
   const ready = await ensureClient();
   if (!ready) {
     connecting = false;
     return; // ensureClient already reported honest off-state
   }
 
-  const mode = state.get('mode') || { input: 'voice', output: 'voice' };
-  const wantAudioOut = mode.output === 'voice';
-
-  // Build system instruction with the persona + freshly loaded facts about Jurek.
+  // Build the system instruction from the persona + the SYNC facts cache — never
+  // await the network here (that would delay time-to-first-audio). If the memory
+  // module hasn't shipped the sync API yet, degrade to no facts.
   let facts = [];
   try {
-    facts = (await memory.loadFacts()) || [];
+    facts = (typeof memory.getFactsCached === 'function' ? memory.getFactsCached() : []) || [];
   } catch (_e) {
     facts = [];
   }
@@ -157,7 +239,9 @@ async function connect(opts = {}) {
       voiceConfig: { prebuiltVoiceConfig: { voiceName: CONFIG.gemini.voiceName } }
     },
     systemInstruction: PERSONA + factBlock,
-    tools: TOOLS,
+    // Tools come from the shared router (built fresh per call), so every module's
+    // init()-registered tool is visible to the model at connect time.
+    tools: toolRouter.getDeclarations(),
     inputAudioTranscription: {},
     outputAudioTranscription: {},
     sessionResumption: opts.handle ? { handle: opts.handle } : {},
@@ -180,7 +264,7 @@ async function connect(opts = {}) {
     connecting = false;
     session = null;
     setStatus('error', String(err && err.message ? err.message : err));
-    bus.emit('toast', { text: 'Nie wpiąłem się w mózg — sprawdź klucz i sieć.', kind: 'warn' });
+    bus.emit('toast', { text: 'Nie udało się połączyć z modelem — sprawdź klucz i sieć.', kind: 'warn' });
     return;
   }
 
@@ -200,8 +284,37 @@ function handleOpen() {
   if (mode.output === 'voice') startAudioOut();
   if (mode.input === 'voice') startAudioIn().catch((e) => console.error('[gemini-live] mic', e));
 
-  // Session opening implies we're now in a conversation.
-  if (state.ui === 'idle') state.setUI('talking', 'voice');
+  // Startup greeting: send exactly ONE user turn with the required phrasing. The
+  // persona has a compliance rule that echoes it verbatim, so Gzowo speaks the
+  // greeting through this Live session. One-shot — cleared before sending.
+  if (pendingGreet) {
+    const name = pendingGreet;
+    pendingGreet = null;
+    try {
+      session.sendClientContent({
+        turns: [{
+          role: 'user',
+          parts: [{ text: 'Przywitaj się dokładnie słowami: "Witaj, ' + name +
+            '. Jak mogę ci dzisiaj pomóc?" i czekaj na odpowiedź.' }]
+        }],
+        turnComplete: true
+      });
+    } catch (err) {
+      console.error('[gemini-live] greet send failed', err);
+    }
+  }
+
+  // Session opening implies a conversation. Flip idle->talking now. If we opened
+  // WHILE the startup reveal is still running (ui==='startup'), we can't flip yet
+  // (startup->talking is invalid); defer the flip until the startup->idle
+  // transition lands — the only transition out of 'startup'.
+  if (state.ui === 'idle') {
+    state.setUI('talking', 'voice');
+  } else if (state.ui === 'startup') {
+    bus.once('state:change', ({ to }) => {
+      if (to === 'idle' && session) state.setUI('talking', 'voice-deferred');
+    });
+  }
 
   // Arm the silence watchdog.
   bumpAudioActivity();
@@ -271,21 +384,31 @@ function handleMessage(message) {
     }
   }
 
-  // ---- toolCall: fan out to UI + always ack so the model can continue ----
+  // ---- toolCall: dispatch through the shared router; send REAL results back ----
   if (message.toolCall && Array.isArray(message.toolCall.functionCalls)) {
-    const calls = message.toolCall.functionCalls;
-    for (const c of calls) {
-      bus.emit('assistant:tool', { name: c.name, args: c.args || {} });
-      // Local intent handled here (session lifecycle) — UI does the rest.
-      if (c.name === 'end_conversation') scheduleGracefulEnd();
-    }
-    try {
-      session && session.sendToolResponse({
-        functionResponses: calls.map((c) => ({ id: c.id, name: c.name, response: { ok: true } }))
-      });
-    } catch (err) {
-      console.error('[gemini-live] tool response failed', err);
-    }
+    handleToolCalls(message.toolCall.functionCalls);
+  }
+}
+
+/**
+ * Run each function call through the tool-router and reply with its REAL result
+ * (bug 9 fix — no more blanket {ok:true}). dispatch() never rejects and enforces
+ * its own 8s timeout, so Promise.all is safe and lets multi-call turns run in
+ * parallel. The router broadcasts 'assistant:tool' itself, so we do NOT emit it.
+ * @param {Array<{id:string,name:string,args?:object}>} calls
+ */
+async function handleToolCalls(calls) {
+  const functionResponses = await Promise.all(calls.map(async (call) => {
+    const result = await toolRouter.dispatch(call.name, call.args || {});
+    // Log the router's real result so the model's spoken claim can be checked
+    // against what actually happened (acceptance: 'schowaj to' -> real response).
+    console.log('[gemini-live] tool', call.name, call.args || {}, '->', result);
+    return { id: call.id, name: call.name, response: result };
+  }));
+  try {
+    if (session) session.sendToolResponse({ functionResponses });
+  } catch (err) {
+    console.error('[gemini-live] sendToolResponse failed', err);
   }
 }
 
@@ -318,7 +441,7 @@ function handleClose(ev) {
 
   // Retry budget spent — be honest.
   setStatus('closed', ev && ev.reason ? String(ev.reason) : 'dropped');
-  bus.emit('toast', { text: 'Sesja padła i nie wróciła — daj znać, spróbuję od nowa.', kind: 'warn' });
+  bus.emit('toast', { text: 'Sesja się rozłączyła i nie wróciła — spróbuj ponownie.', kind: 'warn' });
 }
 
 /**
@@ -388,6 +511,18 @@ function onWake() {
   // Open the session; the wake sound itself is owned by wake-word.js.
   if (!session && !connecting) {
     connect().catch((e) => console.error('[gemini-live] wake connect', e));
+  }
+}
+
+/**
+ * Startup asks the voice stack to speak the greeting. Open a session carrying the
+ * one-shot greet; handleOpen sends the exact phrasing once the pipelines are up.
+ * @param {{username:string}} payload
+ */
+function onStartupGreet(payload) {
+  const username = payload && payload.username;
+  if (!session && !connecting) {
+    connect({ greet: username }).catch((e) => console.error('[gemini-live] greet connect', e));
   }
 }
 
@@ -483,10 +618,10 @@ async function startAudioIn() {
     const busy = name === 'NotReadableError' || name === 'AbortError';
     bus.emit('toast', {
       text: denied
-        ? 'Nie mam mikrofonu — kliknij kłódkę w pasku adresu → Mikrofon → Zezwól, potem spróbuj znów.'
+        ? 'Brak dostępu do mikrofonu — kliknij kłódkę w pasku adresu → Mikrofon → Zezwól i spróbuj ponownie.'
         : busy
-          ? 'Mikrofon jest zajęty — zamknij inne karty z Gzowo / apki używające mikrofonu i spróbuj znów.'
-          : 'Mikrofon niedostępny — sprawdź czy jakiś jest podłączony i dozwolony.',
+          ? 'Mikrofon jest zajęty — zamknij inne karty lub aplikacje, które go używają, i spróbuj ponownie.'
+          : 'Mikrofon niedostępny — sprawdź, czy jest podłączony i dozwolony.',
       kind: 'warn'
     });
     setStatus('error', 'mic: ' + (name || 'unknown'));
@@ -673,6 +808,10 @@ function teardownSession() {
   userBuf = '';
   modelBuf = '';
   if (goAwayTimer) { clearTimeout(goAwayTimer); goAwayTimer = null; }
+  // Latency: warm a fresh token for the NEXT session in the background (single-use
+  // ephemeral tokens can't be reused, so the last one is already spent). Fire-and-
+  // forget — if there's no bridge/worker it silently no-ops.
+  prefetchToken();
 }
 
 /**

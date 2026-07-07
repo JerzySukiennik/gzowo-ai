@@ -2,8 +2,8 @@
 // {voice,text}: republishes state.mode as 'mode:change'. Also provides the
 // Whisper push-to-talk fallback when Gemini Live is down but the bridge is up.
 //
-// GLOBAL RULES: logic only; English comments, PL toasts (Edek tone); honest
-// failure paths; keep this focused and small.
+// GLOBAL RULES: logic only; English comments, PL toasts in a friendly, concise
+// v2 tone (no rhymes/catchphrases); honest failure paths; keep this focused and small.
 
 import { bus } from '../core/event-bus.js';
 import { state } from '../core/state-manager.js';
@@ -68,7 +68,7 @@ async function onToggle() {
   // Bridge offline -> nothing to fall back to. Be honest.
   if (!bridgeClient.online()) {
     bus.emit('toast', {
-      text: 'Głos padł i mostu nie ma — nie mam czym dyktować. Odpal most albo wpisz z palca.',
+      text: 'Głos nie działa, a most jest offline — uruchom most albo przełącz na tekst.',
       kind: 'warn'
     });
     return;
@@ -80,7 +80,7 @@ async function onToggle() {
     });
   } catch (err) {
     console.error('[modes] getUserMedia failed', err);
-    bus.emit('toast', { text: 'Nie dostałem się do mikrofonu — sprawdź uprawnienia.', kind: 'warn' });
+    bus.emit('toast', { text: 'Brak dostępu do mikrofonu — sprawdź uprawnienia.', kind: 'warn' });
     return;
   }
 
@@ -90,7 +90,7 @@ async function onToggle() {
   } catch (err) {
     console.error('[modes] MediaRecorder unsupported', err);
     cleanupStream();
-    bus.emit('toast', { text: 'Ta przeglądarka nie umie nagrywać — spróbuj w Chrome/Brave.', kind: 'warn' });
+    bus.emit('toast', { text: 'Ta przeglądarka nie nagrywa dźwięku — spróbuj w Chrome lub Brave.', kind: 'warn' });
     return;
   }
 
@@ -98,7 +98,7 @@ async function onToggle() {
   recorder.onstop = onRecordingStop;
   recorder.start();
   recording = true;
-  bus.emit('toast', { text: 'Whisper słucha — mów, mam max 5 sekund.', kind: 'info' });
+  bus.emit('toast', { text: 'Whisper słucha — masz 5 sekund.', kind: 'info' });
 
   // Hard cap so a stuck recording still resolves.
   recStopTimer = setTimeout(stopRecording, PTT_MAX_MS);
@@ -119,7 +119,7 @@ async function onRecordingStop() {
   cleanupStream();
 
   if (!blob.size) {
-    bus.emit('toast', { text: 'Nic nie nagrałem — spróbuj jeszcze raz.', kind: 'warn' });
+    bus.emit('toast', { text: 'Nic nie nagrałem — spróbuj ponownie.', kind: 'warn' });
     return;
   }
 
@@ -129,12 +129,12 @@ async function onRecordingStop() {
     text = (res && res.text) ? res.text.trim() : '';
   } catch (err) {
     console.error('[modes] whisper stt failed', err);
-    bus.emit('toast', { text: 'Whisper się wysypał — most nie oddał tekstu.', kind: 'warn' });
+    bus.emit('toast', { text: 'Whisper nie odpowiedział — most nie zwrócił tekstu.', kind: 'warn' });
     return;
   }
 
   if (!text) {
-    bus.emit('toast', { text: 'Whisper nic nie usłyszał — cisza albo szum.', kind: 'warn' });
+    bus.emit('toast', { text: 'Whisper nic nie usłyszał — było za cicho.', kind: 'warn' });
     return;
   }
 
@@ -142,7 +142,7 @@ async function onRecordingStop() {
   // possible; if the brain is fully offline, it stays honestly silent, so we
   // guard with a status check for a truthful message.
   if (state.get('voiceStatus') === 'off') {
-    bus.emit('toast', { text: 'Whisper przetworzył, ale mózg offline — sprawdź klucz.', kind: 'warn' });
+    bus.emit('toast', { text: 'Tekst gotowy, ale model jest offline — sprawdź klucz.', kind: 'warn' });
     return;
   }
   bus.emit('chat:send', { text });

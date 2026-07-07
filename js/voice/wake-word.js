@@ -7,15 +7,21 @@
 // is fast and accurate for a distinctive word like "Gzowo".
 //
 // The Polish model (~53MB) is served locally by the bridge (CONFIG.vosk.modelUrl);
-// on the deployed site without a bridge the model isn't reachable -> honest WAKE OFF.
+// on the deployed site without a bridge the model isn't reachable -> honestly
+// unavailable. The URL is served BY THE BRIDGE and must not change.
 //
 // Mic coordination: the wake listener holds the mic only while IDLE. When a Gemini
 // voice session opens (state -> talking) we RELEASE the mic so GŁOS→GŁOS gets it
 // cleanly (no contention, no self-trigger on Gzowo's own voice); we re-acquire it
-// when we fall back to idle.
+// when we fall back to idle. We never grab the mic in auth/startup/showing.
+//
+// v2 (bug 11): this module is a SILENT good citizen — it NEVER emits 'toast'
+// (console.warn only). It maintains state.wakeModelStatus ('idle'|'loading'|
+// 'ready'|'unavailable') + state.wakeAvailable, which the Settings panel mirrors
+// as a live status line ("model się ładuje…" / "gotowy" / "niedostępny").
 //
 // GLOBAL RULES: logic only; English comments; secrets via CONFIG; honest failure
-// (no toast spam — HUD shows WAKE OFF); graceful degradation everywhere.
+// (no toast spam); graceful degradation everywhere.
 
 import { bus } from '../core/event-bus.js';
 import { state } from '../core/state-manager.js';
@@ -39,58 +45,74 @@ let lastWake = 0;          // debounce repeated detections
 const WAKE_DEBOUNCE_MS = 2500;
 
 /**
- * Idempotent init. Loads the Vosk model if reachable; otherwise honest WAKE OFF.
- * Never throws.
+ * Idempotent init. Loads the Vosk model in the background; publishes status via
+ * state.wakeModelStatus / wakeAvailable. Never throws, never toasts.
  */
 export async function init() {
-  // Capability flag the HUD gates its WAKE toggle on. Off until a model is live.
+  // Capability flag the Settings toggle gates on. Off until a model is live.
   state.set('wakeAvailable', false);
+  state.set('wakeModelStatus', 'idle');
   // Load the ~53MB model in the BACKGROUND. NEVER await it here: main.js awaits
   // init() during boot, and createModel() can take many seconds (or hang on a bad
   // network), which would otherwise freeze the whole app behind a blank screen.
   loadWake();
 }
 
+/** True only when we may actively hold the mic: from a resting idle. Never in
+ *  auth/startup (pre-app), talking (the Live session owns the mic) or showing. */
+function canListen() {
+  return state.ui === 'idle';
+}
+
 async function loadWake() {
   try {
     const vk = (CONFIG && CONFIG.vosk) || {};
+    // Model URL stays served by the bridge — do NOT change it.
     const modelUrl = vk.modelUrl || '/models/vosk-pl.tar.gz';
     keywords = (Array.isArray(vk.keywords) && vk.keywords.length ? vk.keywords : ['hej gzowo', 'ok gzowo', 'gzowo'])
       .map((k) => String(k).toLowerCase());
 
-    // Honest off: model file not reachable (no bridge / not deployed with it).
+    // Honest unavailable: model file not reachable (no bridge / not deployed).
     let reachable = false;
     try { const r = await fetch(modelUrl, { method: 'HEAD' }); reachable = r.ok; } catch (_e) { reachable = false; }
     if (!reachable) {
-      console.warn('[wake-word] Vosk model not reachable at ' + modelUrl + ' — WAKE OFF (odpal most, żeby mieć "Hej Gzowo").');
+      console.warn('[wake-word] Vosk model not reachable at ' + modelUrl + ' — wake unavailable (run the bridge to enable "Hej Gzowo").');
+      state.set('wakeAvailable', false);
+      state.set('wakeModelStatus', 'unavailable');
       return;
     }
 
+    // Model file is reachable; begin the multi-second WASM model load.
+    state.set('wakeModelStatus', 'loading');
     const { createModel } = await import(VOSK_ESM);
     model = await createModel(modelUrl);
     grammar = JSON.stringify([...keywords, '[unk]']);
 
     // Model is live: expose the capability. Listening stays OFF until the user
-    // flips the HUD WAKE toggle (so we never grab the mic behind their back).
+    // enables wake in Settings (so we never grab the mic behind their back).
     state.set('wakeAvailable', true);
-    if (state.get('wakeEnabled') === true) await startListening();
+    state.set('wakeModelStatus', 'ready');
+    if (state.get('wakeEnabled') === true && canListen()) await startListening();
 
-    // Privacy toggle: enable -> acquire mic + listen; disable -> release mic.
+    // Privacy toggle: enable -> acquire mic + listen (only from idle); disable ->
+    // release mic.
     state.subscribe('wakeEnabled', async (enabled) => {
-      try { if (enabled) await startListening(); else await stopListening(); }
-      catch (err) { console.error('[wake-word] toggle failed', err); }
+      try { if (enabled && canListen()) await startListening(); else await stopListening(); }
+      catch (err) { console.warn('[wake-word] toggle failed', err); }
     });
 
     // Release the mic while a voice session is live; re-acquire back at idle.
+    // auth/startup/showing: never actively (re)acquire (canListen() gates that).
     bus.on('state:change', async ({ to }) => {
       try {
         if (to === 'talking') await stopListening();
         else if (to === 'idle' && state.get('wakeEnabled') === true) await startListening();
-      } catch (err) { console.error('[wake-word] state coordination failed', err); }
+      } catch (err) { console.warn('[wake-word] state coordination failed', err); }
     });
   } catch (err) {
-    console.warn('[wake-word] Vosk init failed — WAKE OFF', err);
+    console.warn('[wake-word] Vosk init failed — wake unavailable', err);
     state.set('wakeAvailable', false);
+    state.set('wakeModelStatus', 'unavailable');
   }
 }
 

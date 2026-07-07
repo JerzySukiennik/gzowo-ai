@@ -1,0 +1,59 @@
+rules_version = '2';
+
+// =============================================================================
+// Gzowo AI v2 — reguły Firestore dla WŁASNEGO auth (bez Firebase Auth)
+// =============================================================================
+//
+// Tożsamość NIE jest tu weryfikowana przez Firebase Auth. Konto to dokument
+// users/{username} = {salt, hash, iters, createdAt, lastLogin}, a logowanie
+// sprawdza js/auth/custom-auth.js po stronie klienta (WebCrypto PBKDF2). Zrobiliśmy
+// tak, bo Firebase Auth wymusza hasło min. 6 znaków, a Jurek chciał min. 4.
+//
+// UCZCIWY kompromis (świadomy, akceptowalny dla aplikacji OSOBISTEJ, NIE dla
+// produkcji z realnymi użytkownikami):
+//   • sól i hash są czytelne publicznie (allow get: if true) — inaczej klient nie
+//     mógłby zweryfikować hasła. Skoro hasła mają min. 4 znaki, taki hash da się
+//     złamać brute-force OFFLINE. To jest z definicji słabe.
+//   • bez Firebase Auth reguły NIE potwierdzą, kto pisze — każdy z adresem projektu
+//     może teoretycznie nadpisać cudzy dokument (allow update: if true).
+//   • dlatego: żadnych prawdziwych sekretów w tej bazie. To pamięć osobistego
+//     asystenta (preferencje, fakty, transkrypty) — nie dane wrażliwe.
+//
+// Twarde blokady, które i tak trzymają porządek:
+//   • list = false  — nie da się wylistować/pobrać wszystkich kont naraz.
+//   • create tylko dla NIEistniejącej nazwy i tylko z wymaganymi polami — to blokuje
+//     duplikaty (rejestracja zajętej nazwy przegra po stronie serwera).
+//   • delete = false — kont nie kasujemy przez klienta.
+//
+// Gdzie to wkleić: Firebase Console -> Firestore Database -> Rules -> wklej całość
+// -> Publish. Bez tego zapisy pójdą w tryb domyślny (locked) i pamięć w chmurze nie
+// ruszy — aplikacja wtedy uczciwie zejdzie do TRYBU LOKALNEGO (localStorage).
+// =============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- Konto: users/{username} -------------------------------------------
+    match /users/{username} {
+      // Klient musi odczytać sól+hash, żeby zweryfikować hasło lokalnie.
+      allow get: if true;
+      // Nigdy nie wolno pobrać listy wszystkich kont.
+      allow list: if false;
+      // Rejestracja: tylko gdy nazwa wolna i komplet pól obowiązkowych jest obecny.
+      allow create: if !exists(/databases/$(database)/documents/users/$(username))
+                    && request.resource.data.keys().hasAll(['salt', 'hash', 'iters', 'createdAt']);
+      // lastLogin (i ewentualna zmiana hasła) — dopuszczone (patrz kompromis wyżej).
+      allow update: if true;
+      // Kont nie kasujemy z klienta.
+      allow delete: if false;
+    }
+
+    // ---- Pamięć konta: prefs / facts / transcripts / notes -----------------
+    // Podkolekcje pod users/{username}/... — pełny odczyt/zapis dla aplikacji.
+    // (Ten sam kompromis co wyżej: bez Firebase Auth nie zawężymy tego do
+    //  właściciela; akceptowalne dla użytku osobistego.)
+    match /users/{username}/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

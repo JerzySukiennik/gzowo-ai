@@ -1,27 +1,33 @@
 // js/core/event-bus.js — scaffold-owned, FINAL. Do not edit.
 // The one and only message channel between modules. Synchronous fan-out.
 //
-// ============================ EVENT CATALOG (v1) ============================
+// ============================ EVENT CATALOG (v2) ============================
 // Names are literal strings; payload shapes are binding. Emit exactly these.
 //
 //   'state:change'    {from, to, reason}                   emitted ONLY by state.setUI
-//   'intro:done'      {}                                   intro finished, app visible
-//   'auth:ready'      {user, demo}                         user:{uid,name,email}|null, demo:bool
-//   'memory:ready'    {prefs}                              prefs loaded + applied
+//   'boot:done'       {}                                   emitted ONCE by main.js after all inits
+//   'auth:ready'      {user}                               user:{username}; after auth + memory.attachUser,
+//                                                          ALWAYS deferred until after 'boot:done'
+//   'memory:ready'    {prefs}                              prefs loaded + applied to state
+//   'startup:greet'   {username}                           startup asks the voice stack to greet
+//   'voice:toggle'    {}                                   GŁOS island / Space key
 //   'voice:wake'      {}                                   wake word detected
-//   'voice:toggle'    {}                                   user asks start/stop session (hud/Space)
 //   'voice:session'   {status, detail?}                    status:'connecting'|'open'|'closed'|'error'|'off'
 //   'voice:amplitude' {level, source}                      level:0..1, source:'in'|'out'  (~30/s, smoothed)
 //   'voice:transcript'{role, text, final}                  role:'user'|'gzowo', final:bool
-//   'assistant:tool'  {name, args}                         Gemini function call -> UI
-//   'chat:send'       {text}                               text typed by user
-//   'mode:change'     {input, output}                      input/output: 'voice'|'text'
-//   'widget:request'  {name}                               dock button asks for widget
-//   'orb:slot'        {cx, cy, r}                          px; layout -> orb target
+//   'assistant:tool'  {name, args}                         broadcast AFTER toolRouter.dispatch settles
+//   'chat:send'       {text}                               text typed by user (bubble input)
+//   'mode:change'     {input, output}                      input/output: 'voice'|'text' (modes.js rebroadcasts)
+//   'avatar:slot'     {cx, cy, r}                          px; layout -> avatar target (replaces the v1 orb-slot event)
 //   'layout:widgets'  {count, ids}
-//   'sound:play'      {name}
-//   'bridge:status'   {online, features}                   features:{projects,whisper,ha}
+//   'trash:throw'     {count}                              BEFORE fly-to-trash animations start
+//   'trash:done'      {}                                   after the last victim lands
+//   'sound:play'      {name}                               boot|grant|deny|wake|blip-in|blip-out|trash|timer-done|hum
+//   'bridge:status'   {online, features}                   features:{projects,whisper,ha,fetch}
 //   'toast'           {text, kind?}                         kind:'info'|'warn'  honest-degradation notices
+//
+// REMOVED vs v1: the intro-done, orb-slot and widget-request events (no dock).
+// 'auth:ready' no longer carries a demo flag (v2 has no demo mode).
 // ===========================================================================
 
 /** @type {Map<string, Set<Function>>} */

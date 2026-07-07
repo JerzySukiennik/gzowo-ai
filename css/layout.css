@@ -32,13 +32,15 @@
   contain: layout paint;         /* isolate reflow/paint to each widget box */
 }
 
-/* Header — mono, uppercase, wide tracking, hairline divider under it. */
+/* Header — TITLE ONLY (v2 point 6: the user never manipulates widgets, so there
+   are NO pin/close buttons and no controls cluster). Mono, uppercase, wide
+   tracking, hairline divider under it. */
 .widget-head {
   height: 28px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--line);
   color: var(--fg-dim);
@@ -48,7 +50,7 @@
   user-select: none;
 }
 
-/* Title text truncates instead of pushing the controls off-frame. */
+/* Title text truncates instead of overflowing the frame. */
 .widget-head .widget-title {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -56,42 +58,13 @@
   min-width: 0;
 }
 
-/* Control cluster (pin + close) hugs the right. */
-.widget-head .widget-controls {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.widget-head button {
-  all: unset;
-  cursor: pointer;
-  color: var(--fg-faint);
-  padding: 2px 4px;
-  line-height: 1;
-  border-radius: var(--widget-radius);
-  transition: color var(--t-fast) var(--ease-out);
-}
-.widget-head button:hover,
-.widget-head button:focus-visible {
-  color: var(--fg);
-}
-.widget-head button:focus-visible {
-  outline: 1px solid var(--fg-dim);
-  outline-offset: 1px;
-}
-
-/* Pinned marker — small square before the title, B&W only. */
+/* Pinned marker — small square before the title, B&W only. Pinning is an
+   assistant-only API; this is a passive status glyph, not an interactive control. */
 .widget.is-pinned .widget-head::before {
   content: '▪';
   margin-right: var(--space-1);
   color: var(--fg);
   flex: 0 0 auto;
-}
-/* Active state of the pin control reads as "on". */
-.widget.is-pinned .widget-pin {
-  color: var(--fg);
 }
 
 /* Body — the ONLY place color is allowed. Chrome stays neutral. */
@@ -104,8 +77,12 @@
   color: var(--fg);
 }
 
-/* Respect reduced-motion: the engine also checks this in JS, but if any UA
-   ignores WAAPI options we at least neutralize hover transitions. */
+/* Respect reduced-motion. All widget motion is driven by the layout engine via
+   the Web Animations API, which already checks prefers-reduced-motion in JS and
+   lands on the final frame without animating. The frame chrome itself carries no
+   CSS transitions (no interactive controls remain), so there is nothing to
+   neutralize here — the block is kept as the explicit home for any future
+   chrome-level motion so it degrades honestly. */
 @media (prefers-reduced-motion: reduce) {
-  .widget-head button { transition: none; }
+  .widget { will-change: auto; }
 }

@@ -156,6 +156,161 @@ async function handleProxy(request, env, cors) {
   return new Response(upstream.body, { status: upstream.status, headers });
 }
 
+// ---------------------------------------------------------------------------
+// GET /fetch?url=... — read a page's text so the model can summarize it aloud.
+// Mirrors the bridge's /fetch contract: validate http/https, fetch server-side
+// (10s timeout, follow redirects, cap the read at 2MB), extract <title>, strip
+// script/style/noscript + all tags, collapse whitespace, return
+// {ok:true,title,text} with text capped at 8000 chars. Errors -> {ok:false,error}
+// with status 502. Unlike /proxy this is intentionally NOT allowlisted (the whole
+// point is reading arbitrary public pages), but private/loopback hosts are
+// refused as light SSRF hygiene.
+// ---------------------------------------------------------------------------
+const FETCH_TIMEOUT_MS = 10000;
+const FETCH_MAX_BYTES = 2 * 1024 * 1024; // 2MB
+const FETCH_TEXT_CAP = 8000;
+
+/** Reject loopback / private / link-local hosts (light SSRF guard). */
+function isBlockedHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  if (h === '0.0.0.0' || h === '::1' || h === '::' ) return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = +m[1], b = +m[2];
+    if (a === 0 || a === 127) return true;             // this-host / loopback
+    if (a === 10) return true;                          // private
+    if (a === 192 && b === 168) return true;            // private
+    if (a === 172 && b >= 16 && b <= 31) return true;   // private
+    if (a === 169 && b === 254) return true;            // link-local / metadata
+  }
+  return false;
+}
+
+/** Read a response body, stopping hard at maxBytes even if content-length lies. */
+async function readCapped(response, maxBytes) {
+  const body = response.body;
+  if (!body || typeof body.getReader !== 'function') {
+    const buf = await response.arrayBuffer();
+    const bytes = new Uint8Array(buf).subarray(0, maxBytes);
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.length) {
+      chunks.push(value);
+      total += value.length;
+      if (total >= maxBytes) {
+        try { await reader.cancel(); } catch (_e) { /* ignore */ }
+        break;
+      }
+    }
+  }
+  const merged = new Uint8Array(Math.min(total, maxBytes));
+  let off = 0;
+  for (const c of chunks) {
+    if (off >= merged.length) break;
+    const slice = c.subarray(0, merged.length - off);
+    merged.set(slice, off);
+    off += slice.length;
+  }
+  return new TextDecoder('utf-8', { fatal: false }).decode(merged);
+}
+
+function stripTags(s) { return s.replace(/<[^>]*>/g, ' '); }
+function collapseWs(s) { return s.replace(/\s+/g, ' ').trim(); }
+
+function decodeEntities(s) {
+  return s
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => { try { return String.fromCodePoint(parseInt(n, 10)); } catch { return ' '; } })
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => { try { return String.fromCodePoint(parseInt(n, 16)); } catch { return ' '; } })
+    .replace(/&amp;/gi, '&'); // last, so we never re-introduce entities to decode
+}
+
+function extractTitle(html) {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return '';
+  return decodeEntities(collapseWs(stripTags(m[1]))).slice(0, 300);
+}
+
+function htmlToText(html) {
+  let s = html;
+  // Drop the whole <head> (title/meta/link noise) — the title is extracted
+  // separately from the original HTML, so this only removes duplication/noise.
+  s = s.replace(/<head[\s\S]*?<\/head>/gi, ' ');
+  s = s.replace(/<title[\s\S]*?<\/title>/gi, ' '); // in case it sits outside <head>
+  s = s.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  s = s.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  s = s.replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+  s = s.replace(/<!--[\s\S]*?-->/g, ' ');
+  // Keep word separation across block boundaries before stripping the rest.
+  s = s.replace(/<\/(p|div|section|article|li|h[1-6]|tr|header|footer|main|nav)>/gi, ' ');
+  s = s.replace(/<br\s*\/?>/gi, ' ');
+  s = stripTags(s);
+  s = decodeEntities(s);
+  s = collapseWs(s);
+  return s;
+}
+
+async function handleFetch(request, env, cors) {
+  const target = new URL(request.url).searchParams.get('url');
+  if (!target) return json({ ok: false, error: 'missing url param' }, 502, cors);
+
+  let parsed;
+  try { parsed = new URL(target); } catch { return json({ ok: false, error: 'invalid url' }, 502, cors); }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return json({ ok: false, error: 'only http/https urls are allowed' }, 502, cors);
+  }
+  if (isBlockedHost(parsed.hostname)) {
+    return json({ ok: false, error: 'ten adres jest zablokowany' }, 502, cors);
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(parsed.toString(), {
+      method: 'GET',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; GzowoAI/2.0)',
+        'Accept': 'text/html,application/xhtml+xml,text/plain'
+      }
+    });
+  } catch (err) {
+    return json({ ok: false, error: `nie udało się pobrać strony: ${err && err.message ? err.message : 'brak połączenia'}` }, 502, cors);
+  }
+
+  if (!upstream.ok) {
+    return json({ ok: false, error: `strona odpowiedziała ${upstream.status}` }, 502, cors);
+  }
+
+  const ctype = upstream.headers.get('content-type') || '';
+  if (ctype && !/text\/html|application\/xhtml|text\/plain|application\/xml|text\/xml/i.test(ctype)) {
+    return json({ ok: false, error: 'to nie jest strona z tekstem do przeczytania' }, 502, cors);
+  }
+
+  let html;
+  try {
+    html = await readCapped(upstream, FETCH_MAX_BYTES);
+  } catch (_err) {
+    return json({ ok: false, error: 'strona urwała się w trakcie pobierania' }, 502, cors);
+  }
+
+  const title = extractTitle(html);
+  const text = htmlToText(html).slice(0, FETCH_TEXT_CAP);
+  return json({ ok: true, title, text }, 200, cors);
+}
+
 export default {
   async fetch(request, env) {
     const cors = corsHeaders(request, env);
@@ -174,6 +329,9 @@ export default {
       }
       if (path === '/proxy' && request.method === 'GET') {
         return await handleProxy(request, env, cors);
+      }
+      if (path === '/fetch' && request.method === 'GET') {
+        return await handleFetch(request, env, cors);
       }
       return json({ error: 'not found' }, 404, cors);
     } catch (err) {

@@ -1,4 +1,6 @@
-/* css/design-tokens.css — SINGLE SOURCE OF TRUTH. Every module uses ONLY these vars. Never hardcode colors, fonts, z-indexes or timings anywhere else. B&W is SACRED: chrome/UI may use only --bg/--fg/gray/line vars; real color is allowed ONLY inside .widget-body. */
+/* css/design-tokens.css — v2 SINGLE SOURCE OF TRUTH. Every module uses ONLY these vars.
+   Never hardcode colors, fonts, z-indexes or timings anywhere else. B&W is SACRED:
+   chrome/UI may use only --bg/--fg/gray/line/glass vars; real color ONLY inside .widget-body. */
 :root {
   /* Palette — white on black */
   --bg: #000000;
@@ -6,16 +8,28 @@
   --fg: #ffffff;
   --fg-dim: #9a9a9a;
   --fg-faint: #555555;
-  --line: #1a1a1a;            /* hairline dividers */
-  --line-strong: #222222;     /* widget borders */
-  --line-bright: #3a3a3a;     /* hover/active borders */
+  --line: #1a1a1a;
+  --line-strong: #222222;
+  --line-bright: #3a3a3a;
   --grid-line: rgba(255,255,255,0.045);
   --grid-size: 56px;
   --glow-soft: 0 0 24px rgba(255,255,255,0.18);
   --glow-strong: 0 0 48px rgba(255,255,255,0.35);
   --scrim: rgba(0,0,0,0.78);
 
-  /* Typography — terminal/mono-forward (Iron-Man boot vibe) */
+  /* Liquid-glass family — the ONE glass recipe (islands, TRYBY panel, chat bubble,
+     settings card, auth card, trash disc all use exactly these) */
+  --glass-bg: rgba(255,255,255,0.06);
+  --glass-bg-active: rgba(255,255,255,0.13);
+  --glass-border: rgba(255,255,255,0.16);
+  --glass-border-bright: rgba(255,255,255,0.30);
+  --glass-highlight: linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0) 55%);
+  --glass-blur: 22px;
+  --glass-shadow: 0 10px 40px rgba(0,0,0,0.60);
+  --glass-radius: 28px;      /* pill/card radius */
+  --glass-radius-sm: 14px;   /* inner options, small cards */
+
+  /* Typography — terminal/mono-forward */
   --font-mono: 'JetBrains Mono','Space Mono',ui-monospace,'SF Mono',Menlo,monospace;
   --font-text: 'Space Grotesk',-apple-system,'Helvetica Neue',Arial,sans-serif;
   --text-xs: 10px; --text-sm: 12px; --text-md: 14px; --text-lg: 18px;
@@ -26,35 +40,50 @@
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
 
-  /* Layout metrics (consumed by the layout engine) */
-  --hud-h: 48px;
-  --dock-h: 56px;
-  --chat-w: 320px;
+  /* Layout metrics (consumed by the layout engine + UI modules).
+     v2: NO top bar (--hud-h deleted), NO dock (--dock-h deleted), NO chat panel (--chat-w deleted). */
+  --islands-h: 56px;            /* island pill height */
+  --islands-gap: 16px;          /* gap between the two islands */
+  --islands-bottom: 28px;       /* islands' distance from the bottom edge */
+  --islands-clearance: 112px;   /* bottom safe-area reserve for widgets (= islands-h + 2*islands-bottom) */
   --widget-gap: 16px;
   --widget-radius: 2px;
-  --orb-idle-ratio: 0.30;    /* orb diameter / min(vw,vh) in Idle+Talking */
-  --orb-corner-ratio: 0.12;  /* orb diameter / min(vw,vh) in Showing (top-left) */
+  --avatar-idle-ratio: 0.30;    /* avatar diameter / min(vw,vh) in idle+talking (replaces --orb-idle-ratio) */
+  --avatar-corner-ratio: 0.12;  /* avatar diameter / min(vw,vh) in showing, top-left (replaces --orb-corner-ratio) */
+  --bubble-max-w: 380px;        /* chat bubble beside the avatar */
+  --bubble-offset: 24px;        /* gap between avatar edge and bubble */
+  --trash-size: 56px;           /* pop-up trash disc (bottom-right) */
+  --trash-margin: 24px;
 
   /* Z-index map — never invent new layers */
-  --z-grid: 0; --z-orb: 10; --z-widgets: 20; --z-hud: 30; --z-chat: 35; --z-toast: 50; --z-intro: 100;
+  --z-grid: 0; --z-avatar: 10; --z-widgets: 20; --z-bubble: 25;
+  --z-islands: 30; --z-trash: 32; --z-settings: 60; --z-toast: 70; --z-auth: 100;
 
   /* Motion — Prawo ruchu timings (transform/opacity ONLY, 60fps on Intel i9) */
-  --t-fast: 150ms;   /* hovers, blinks */
-  --t-med: 300ms;    /* reflow of neighbors */
-  --t-slow: 600ms;   /* widget fly-in/out, orb slot travel */
-  --t-cine: 1200ms;  /* state-change choreography, intro beats */
+  --t-fast: 150ms;
+  --t-med: 300ms;
+  --t-slow: 600ms;
+  --t-cine: 1200ms;   /* startup reveal, state choreography */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --fly-distance: 120px;
   --stagger: 40ms;
 }
-/* Theme: Blueprint — stronger grid + denser HUD lines (sketch #3). Default theme is Mono (sketch #4). */
+
+/* Theme: Blueprint — denser grid + drafting lines. Mono is the clean default. */
 [data-theme="blueprint"] {
   --grid-line: rgba(255,255,255,0.09);
   --grid-size: 40px;
   --line: #222222; --line-strong: #2e2e2e;
 }
+
 @media (max-width: 720px) {
-  :root { --grid-size: 40px; --hud-h: 40px; --dock-h: 64px; --chat-w: 100vw; --widget-gap: 12px; --text-hero: 44px; --orb-idle-ratio: 0.42; }
+  :root {
+    --grid-size: 40px; --widget-gap: 12px; --text-hero: 44px;
+    --avatar-idle-ratio: 0.42;
+    --bubble-max-w: 78vw;
+    --islands-h: 52px; --islands-bottom: 20px; --islands-clearance: 96px;
+    --trash-size: 48px; --trash-margin: 16px;
+  }
 }

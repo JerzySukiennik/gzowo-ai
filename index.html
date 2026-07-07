@@ -5,45 +5,50 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>GZOWO</title>
 
-  <!-- Fonts: JetBrains Mono (HUD/mono) + Space Grotesk (body text) -->
+  <!-- Fonts: JetBrains Mono (mono/terminal) + Space Grotesk (body text) -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500&display=swap" rel="stylesheet" />
 
-  <!-- Styles: tokens first (single source of truth), then base chrome, then module sheets -->
+  <!-- Styles: tokens first (single source of truth), then base chrome, then module sheets.
+       islands/chat-bubble/trash/settings/auth are shipped by other builders; linking a
+       not-yet-created stylesheet is harmless (the request just 404s, nothing breaks). -->
   <link rel="stylesheet" href="css/design-tokens.css" />
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/layout.css" />
-  <link rel="stylesheet" href="css/hud.css" />
-  <link rel="stylesheet" href="css/themes.css" />
+  <link rel="stylesheet" href="css/islands.css" />
+  <link rel="stylesheet" href="css/chat-bubble.css" />
+  <link rel="stylesheet" href="css/trash.css" />
+  <link rel="stylesheet" href="css/settings.css" />
+  <link rel="stylesheet" href="css/auth.css" />
   <link rel="stylesheet" href="css/widgets.css" />
-  <link rel="stylesheet" href="css/intro.css" />
+  <link rel="stylesheet" href="css/themes.css" />
 
-  <!-- Import map MUST come before main.js. Pure ES modules from CDN, no build step. -->
+  <!-- Import map MUST come before main.js. Pure ES modules from CDN, no build step.
+       v2: avatar is Canvas 2D (no three.js) and wake uses vosk-browser via a direct
+       URL import, so @google/genai is the only bare-specifier dependency left. -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-      "@google/genai": "https://esm.run/@google/genai@1",
-      "@picovoice/porcupine-web": "https://esm.run/@picovoice/porcupine-web@3",
-      "@picovoice/web-voice-processor": "https://esm.run/@picovoice/web-voice-processor@4"
+      "@google/genai": "https://esm.run/@google/genai@1"
     }
   }
   </script>
 </head>
-<body data-theme="mono" data-ui="intro">
+<body data-theme="mono" data-ui="auth">
   <div id="grid-bg"></div>
-  <canvas id="orb-canvas"></canvas>
+  <canvas id="avatar-canvas"></canvas>
   <main id="widget-layer"></main>
-  <header id="hud-top"></header>
-  <footer id="dock"></footer>
-  <aside id="chat-panel" hidden></aside>
+  <div id="chat-bubble" hidden></div>
+  <nav id="islands" aria-label="Sterowanie"></nav>
+  <div id="trash-corner" aria-hidden="true"></div>
+  <div id="settings-layer" hidden></div>
   <div id="toast-layer"></div>
-  <div id="intro-layer"></div>
+  <div id="auth-layer"></div>
 
   <noscript>
     <div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000;color:#fff;font-family:monospace;text-align:center;padding:24px;z-index:9999">
-      Gzowo potrzebuje JavaScriptu, człowieku. Włącz go w przeglądarce i odpal jeszcze raz.
+      Gzowo potrzebuje JavaScriptu. Włącz go w przeglądarce i odśwież stronę.
     </div>
   </noscript>
 

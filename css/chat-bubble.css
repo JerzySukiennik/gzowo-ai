@@ -1,0 +1,181 @@
+/* css/chat-bubble.css — the floating glass speech bubble beside the avatar (v2).
+   -----------------------------------------------------------------------------
+   #chat-bubble is the fixed, transform-POSITIONED anchor (base.css gives it
+   position:fixed, top:0/left:0, z:--z-bubble, [hidden]{display:none}); chat.js
+   sets style.transform=translate(x,y) and data-side. The visible card is the
+   shared .glass recipe; this sheet only shapes it, points its tail at the avatar,
+   and choreographs the show/hide + glide. Reserves NO layout space — it floats
+   above widgets and may visually overlap (glass blur). Strictly B&W (tokens only);
+   transform + opacity are the only animated properties. -------------------------- */
+
+/* ---- Anchor: glide its position, fade it in/out. Transform is set inline by JS;
+        transitioning it here makes the bubble follow the avatar smoothly. ------- */
+#chat-bubble {
+  opacity: 0;
+  pointer-events: none;              /* the transparent anchor never eats clicks */
+  transition:
+    transform var(--t-med) var(--ease-out),
+    opacity var(--t-med) var(--ease-out);
+}
+#chat-bubble.is-shown { opacity: 1; }
+
+/* ---- Tail: a small rotated glass square on the avatar-facing side. Lives on the
+        anchor (::before) because the .glass card clips its own overflow. -------- */
+#chat-bubble::before {
+  content: '';
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--glass-bg);
+  border-left: 1px solid var(--glass-border);
+  border-top: 1px solid var(--glass-border);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  pointer-events: none;
+  z-index: -1;                       /* tuck behind the card edge */
+}
+/* data-side='right' → avatar sits to the LEFT: tail on the card's left edge. */
+#chat-bubble[data-side='right']::before {
+  left: -5px;
+  top: 50%;
+  transform: translateY(-50%) rotate(45deg);
+}
+/* data-side='below' → avatar sits ABOVE: tail on the card's top edge. */
+#chat-bubble[data-side='below']::before {
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+/* ---- The card (shared .glass; small radius; grows from the avatar side) ------ */
+.chat-card {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: max-content;
+  min-width: 200px;
+  max-width: var(--bubble-max-w);
+  padding: var(--space-4);
+  border-radius: var(--glass-radius-sm);   /* override the .glass pill radius */
+  font-family: var(--font-mono);
+  /* Show/hide scale — origin points toward the avatar so it unfolds from the tail. */
+  transform: scale(0.96);
+  transform-origin: left center;
+  transition: transform var(--t-med) var(--ease-out);
+}
+#chat-bubble.is-shown .chat-card { transform: scale(1); }
+#chat-bubble[data-side='below'] .chat-card { transform-origin: top center; }
+
+/* ---- (a) last-user line — one line, dim, prefixed, truncated with ellipsis --- */
+.chat-user {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking);
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.chat-user-prefix {
+  flex: none;
+  color: var(--fg-faint);
+  text-transform: uppercase;
+}
+.chat-user-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- (b) assistant transcript — streaming gzowo text, internal scroll --------
+        ~8 lines then overflow (max ~40vh), autoscrolled by JS. ----------------- */
+.chat-body {
+  min-height: 1.4em;
+  max-height: 40vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-md);
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+}
+.chat-gzowo { color: var(--fg); }
+
+/* Blinking block caret — only animates while a partial is streaming (.blink).
+   At rest it stays transparent so it never shows between turns. */
+.chat-caret {
+  color: var(--fg);
+  opacity: 0;
+  margin-left: 1px;
+}
+.chat-caret.blink { animation: chat-caret-blink 1s steps(1, end) infinite; }
+@keyframes chat-caret-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* ---- (c) input row — only shown when mode.input==='text' (JS toggles [hidden]) */
+.chat-form {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+.chat-form[hidden] { display: none; }
+
+.chat-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid var(--line-bright);
+  border-radius: calc(var(--glass-radius-sm) - 6px);
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg);
+  transition: border-color var(--t-fast) var(--ease-out);
+}
+.chat-input::placeholder { color: var(--fg-faint); }
+.chat-input:focus {
+  outline: none;
+  border-color: var(--glass-border-bright);
+}
+
+.chat-submit {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 1px solid var(--line-bright);
+  border-radius: calc(var(--glass-radius-sm) - 6px);
+  padding: 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
+}
+.chat-submit:hover {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+.chat-submit:active { transform: translateY(1px); }
+
+/* ---- Reduced motion — kill transitions/animation, keep final states --------- */
+@media (prefers-reduced-motion: reduce) {
+  #chat-bubble,
+  .chat-card { transition: none; }
+  .chat-caret.blink { animation: none; opacity: 1; }
+}

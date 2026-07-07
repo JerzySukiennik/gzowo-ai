@@ -53,6 +53,37 @@ const PORT = parseInt(env.PORT || '8787', 10);
 const PROJECTS_DIR = env.PROJECTS_DIR || resolve(APP_ROOT, '..', '..');
 
 // ---------------------------------------------------------------------------
+// Home Assistant config (read from bridge/.env). The token lives ONLY here —
+// it is added server-side to every HA request and NEVER reaches the browser.
+// haConfigured() gates every /ha/* route: unconfigured -> honest 503, no fakes.
+// ---------------------------------------------------------------------------
+const HA_URL = (env.HA_URL || '').replace(/\/$/, '');
+const HA_TOKEN = env.HA_TOKEN || '';
+const HA_BAMBU_PREFIX = env.HA_BAMBU_PREFIX || '';
+
+function haConfigured() {
+  return Boolean(HA_URL && HA_TOKEN);
+}
+
+/**
+ * Fetch an HA REST path with the long-lived token attached server-side.
+ * @param {string} path  e.g. '/api/states'
+ * @param {RequestInit} [init]  extra fetch options (method/body/headers merge in)
+ * @returns {Promise<Response>}
+ */
+function haFetch(path, init = {}) {
+  return fetch(HA_URL + path, {
+    ...init,
+    headers: {
+      Authorization: 'Bearer ' + HA_TOKEN,
+      'Content-Type': 'application/json',
+      ...(init.headers || {})
+    },
+    signal: AbortSignal.timeout(8000)
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 2. Static hosting — serve APP_ROOT with path-traversal protection.
 // ---------------------------------------------------------------------------
 const MIME = {
@@ -205,11 +236,12 @@ function whisperReady() {
 async function handleHealth(req, res) {
   sendJson(res, 200, {
     ok: true,
-    version: '1.0',
+    version: '2.0',
     features: {
       projects: existsSync(PROJECTS_DIR), // honest: false if the dir is unreadable
       whisper: whisperReady(),
-      ha: false // Home Assistant lands in v1.1 — honest placeholder.
+      ha: haConfigured(),                 // true only when HA_URL + HA_TOKEN are set
+      fetch: true                         // shared web-fetch endpoint is always on
     }
   });
 }
@@ -266,13 +298,284 @@ async function handleStt(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// 5. Home Assistant proxy routes. Every route is honest: unconfigured -> 503,
+//    HA errors pass through with their real status, nothing is ever faked.
+// ---------------------------------------------------------------------------
+
+// Trim a raw HA state object down to the fields the UI actually needs (diet).
+function trimState(s) {
+  const a = (s && s.attributes) || {};
+  return {
+    entity_id: s.entity_id,
+    state: s.state,
+    attributes: {
+      friendly_name: a.friendly_name,
+      unit_of_measurement: a.unit_of_measurement,
+      device_class: a.device_class
+    }
+  };
+}
+
+// Read + JSON-parse an HA response, forwarding non-OK status honestly.
+// Returns {ok:true, data} on success or {ok:false} after already responding.
+async function haReadJson(res, upstream) {
+  if (!upstream.ok) {
+    let detail = '';
+    try { detail = await upstream.text(); } catch { /* ignore */ }
+    sendJson(res, upstream.status, { error: detail || `ha error ${upstream.status}` });
+    return { ok: false };
+  }
+  try {
+    return { ok: true, data: await upstream.json() };
+  } catch {
+    sendJson(res, 502, { error: 'ha returned non-JSON' });
+    return { ok: false };
+  }
+}
+
+async function handleHaStates(req, res, url) {
+  if (!haConfigured()) { sendJson(res, 503, { error: 'ha not configured' }); return; }
+  const domain = url.searchParams.get('domain') || '';
+  const prefix = url.searchParams.get('prefix') || '';
+
+  let upstream;
+  try {
+    upstream = await haFetch('/api/states');
+  } catch (err) {
+    sendJson(res, 502, { error: `ha unreachable: ${err.message || err}` });
+    return;
+  }
+  const parsed = await haReadJson(res, upstream);
+  if (!parsed.ok) return;
+
+  const states = Array.isArray(parsed.data) ? parsed.data : [];
+  const filtered = states
+    .filter((s) => {
+      const id = s && s.entity_id ? String(s.entity_id) : '';
+      if (!id) return false;
+      if (domain && !id.startsWith(domain + '.')) return false;
+      if (prefix && !id.includes(prefix)) return false;
+      return true;
+    })
+    .map(trimState);
+  sendJson(res, 200, filtered);
+}
+
+async function handleHaService(req, res) {
+  if (!haConfigured()) { sendJson(res, 503, { error: 'ha not configured' }); return; }
+
+  let payload;
+  try {
+    const raw = await readBody(req, 1024 * 1024);
+    payload = JSON.parse(raw.toString('utf8') || '{}');
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+
+  const domain = payload && payload.domain;
+  const service = payload && payload.service;
+  const data = (payload && payload.data) || {};
+  if (typeof domain !== 'string' || !domain || typeof service !== 'string' || !service) {
+    sendJson(res, 400, { error: 'domain and service (strings) are required' });
+    return;
+  }
+  // Guard the URL path against injection (HA domains/services are [a-z0-9_]).
+  if (!/^[a-z0-9_]+$/i.test(domain) || !/^[a-z0-9_]+$/i.test(service)) {
+    sendJson(res, 400, { error: 'invalid domain or service' });
+    return;
+  }
+
+  let upstream;
+  try {
+    upstream = await haFetch(`/api/services/${domain}/${service}`, {
+      method: 'POST',
+      body: JSON.stringify(data)
+    });
+  } catch (err) {
+    sendJson(res, 502, { error: `ha unreachable: ${err.message || err}` });
+    return;
+  }
+
+  const text = await upstream.text();
+  if (!upstream.ok) {
+    sendJson(res, upstream.status, { error: text || `ha error ${upstream.status}` });
+    return;
+  }
+  // HA replies with a JSON array of changed states (often empty). Pass it on.
+  let result;
+  try { result = text ? JSON.parse(text) : []; } catch { result = []; }
+  sendJson(res, 200, result);
+}
+
+async function handleHaBambu(req, res) {
+  if (!haConfigured()) { sendJson(res, 503, { error: 'ha not configured' }); return; }
+  if (!HA_BAMBU_PREFIX) { sendJson(res, 503, { error: 'HA_BAMBU_PREFIX not set' }); return; }
+
+  let upstream;
+  try {
+    upstream = await haFetch('/api/states');
+  } catch (err) {
+    sendJson(res, 502, { error: `ha unreachable: ${err.message || err}` });
+    return;
+  }
+  const parsed = await haReadJson(res, upstream);
+  if (!parsed.ok) return;
+
+  const states = Array.isArray(parsed.data) ? parsed.data : [];
+  const matches = states.filter(
+    (s) => s && s.entity_id && String(s.entity_id).includes(HA_BAMBU_PREFIX)
+  );
+
+  const printer = {};
+  let cameraEntity = null;
+  for (const s of matches) {
+    const id = String(s.entity_id);
+    if (id.startsWith('camera.') && !cameraEntity) cameraEntity = id;
+    const suffix = id.includes('.') ? id.slice(id.indexOf('.') + 1) : id;
+    const a = s.attributes || {};
+    printer[suffix] = {
+      state: s.state,
+      attributes: {
+        friendly_name: a.friendly_name,
+        unit_of_measurement: a.unit_of_measurement
+      }
+    };
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    printer,
+    camera: cameraEntity
+      ? { entity_id: cameraEntity, src: '/ha/camera?entity=' + encodeURIComponent(cameraEntity) }
+      : null
+  });
+}
+
+async function handleHaCamera(req, res, url) {
+  if (!haConfigured()) { sendJson(res, 503, { error: 'ha not configured' }); return; }
+  const entity = url.searchParams.get('entity') || '';
+  if (!/^camera\.[a-z0-9_]+$/.test(entity)) {
+    sendJson(res, 400, { error: 'invalid camera entity' });
+    return;
+  }
+
+  let upstream;
+  try {
+    upstream = await haFetch('/api/camera_proxy/' + entity);
+  } catch (err) {
+    sendJson(res, 502, { error: `ha unreachable: ${err.message || err}` });
+    return;
+  }
+  if (!upstream.ok) {
+    let detail = '';
+    try { detail = await upstream.text(); } catch { /* ignore */ }
+    sendJson(res, upstream.status, { error: detail || `ha error ${upstream.status}` });
+    return;
+  }
+
+  // Pipe the image bytes through with their content-type. The Authorization
+  // header was added server-side by haFetch — the token never left the Mac.
+  const ct = upstream.headers.get('content-type') || 'image/jpeg';
+  const buf = Buffer.from(await upstream.arrayBuffer());
+  res.writeHead(200, { 'Content-Type': ct, 'Cache-Control': 'no-store' });
+  res.end(buf);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Shared web-fetch endpoint (the web-embed builder consumes it). Server-side
+//    fetch keeps CORS out of the browser's way; output is title + stripped text.
+// ---------------------------------------------------------------------------
+const FETCH_CAP = 2 * 1024 * 1024; // 2 MB hard body cap
+
+// Decode the handful of HTML entities that matter for readable plain text.
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_m, n) => {
+      const code = parseInt(n, 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : _m;
+    });
+}
+
+// Read up to `cap` bytes from a fetch Response body, then stop (avoid OOM).
+async function readCapped(upstream, cap) {
+  const reader = upstream.body && upstream.body.getReader ? upstream.body.getReader() : null;
+  if (!reader) {
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    return buf.subarray(0, cap);
+  }
+  const chunks = [];
+  let received = 0;
+  while (received < cap) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.length;
+    chunks.push(Buffer.from(value));
+  }
+  try { await reader.cancel(); } catch { /* ignore */ }
+  return Buffer.concat(chunks).subarray(0, cap);
+}
+
+async function handleFetch(req, res, url) {
+  const target = url.searchParams.get('url') || '';
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    sendJson(res, 400, { ok: false, error: 'invalid url' });
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    sendJson(res, 400, { ok: false, error: 'only http/https allowed' });
+    return;
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(parsed.toString(), {
+      redirect: 'follow',
+      headers: { 'User-Agent': 'GzowoBridge/2.0' },
+      signal: AbortSignal.timeout(10000)
+    });
+  } catch (err) {
+    sendJson(res, 502, { ok: false, error: `fetch failed: ${err.message || err}` });
+    return;
+  }
+  if (!upstream.ok) {
+    sendJson(res, upstream.status, { ok: false, error: `upstream ${upstream.status}` });
+    return;
+  }
+
+  const html = (await readCapped(upstream, FETCH_CAP)).toString('utf8');
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? decodeEntities(titleMatch[1]).replace(/\s+/g, ' ').trim().slice(0, 300) : '';
+  const text = decodeEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+  ).replace(/\s+/g, ' ').trim().slice(0, 8000);
+
+  sendJson(res, 200, { ok: true, title, text });
+}
+
+// ---------------------------------------------------------------------------
 // Request dispatcher.
 // ---------------------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
   const started = Date.now();
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const path = url.pathname;
-  const isApi = path === '/health' || path === '/token' || path === '/projects' || path === '/stt';
+  const isApi =
+    path === '/health' || path === '/token' || path === '/projects' || path === '/stt' ||
+    path === '/ha/states' || path === '/ha/service' || path === '/ha/bambu' ||
+    path === '/ha/camera' || path === '/fetch';
 
   // Log one line per request when finished.
   res.on('finish', () => {
@@ -299,6 +602,11 @@ const server = http.createServer(async (req, res) => {
     if (path === '/token' && req.method === 'GET') return await handleToken(req, res);
     if (path === '/projects' && req.method === 'GET') return await handleProjects(req, res);
     if (path === '/stt' && req.method === 'POST') return await handleStt(req, res);
+    if (path === '/ha/states' && req.method === 'GET') return await handleHaStates(req, res, url);
+    if (path === '/ha/service' && req.method === 'POST') return await handleHaService(req, res);
+    if (path === '/ha/bambu' && req.method === 'GET') return await handleHaBambu(req, res);
+    if (path === '/ha/camera' && req.method === 'GET') return await handleHaCamera(req, res, url);
+    if (path === '/fetch' && req.method === 'GET') return await handleFetch(req, res, url);
 
     // Anything else = static file serving.
     if (req.method === 'GET') return serveStatic(req, res, path);
@@ -339,6 +647,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  app root:     ${APP_ROOT}`);
   console.log(`  projects dir: ${PROJECTS_DIR}`);
   console.log(`  whisper:      ${whisperReady() ? 'ready' : 'off (WHISPER_BIN unset)'}`);
+  console.log(`  home assist.: ${haConfigured() ? 'configured' : 'off (HA_URL/HA_TOKEN unset)'}`);
   console.log(`  gemini key:   ${env.GEMINI_API_KEY ? 'set' : 'MISSING (/token -> 503)'}`);
   console.log('');
 });
