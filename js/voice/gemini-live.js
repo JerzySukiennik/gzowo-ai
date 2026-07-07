@@ -149,7 +149,10 @@ async function connect(opts = {}) {
     : '';
 
   const config = {
-    responseModalities: [wantAudioOut ? Modality.AUDIO : Modality.TEXT],
+    // Live (bidiGenerateContent) models ONLY support AUDIO output — requesting
+    // TEXT closes the socket with 1007. So we always generate audio; text-output
+    // modes simply don't PLAY it and surface the outputTranscription as the reply.
+    responseModalities: [Modality.AUDIO],
     speechConfig: {
       voiceConfig: { prebuiltVoiceConfig: { voiceName: CONFIG.gemini.voiceName } }
     },
@@ -228,20 +231,18 @@ function handleMessage(message) {
     // Interruption: model was cut off -> flush the playback queue instantly.
     if (sc.interrupted) flushPlayback();
 
-    // Model audio AND inline text parts. In TEXT-output mode Gemini returns the
-    // reply as modelTurn.parts[].text (and does NOT populate outputTranscription,
-    // which only transcribes generated AUDIO). Read both so text-output modes
-    // (GŁOS→TEKST, TEKST→TEKST) actually surface Gzowo's answer.
+    // Native-audio models always reply with AUDIO parts. Any part.text here is
+    // the model's internal THINKING (not the answer) — ignore it. The real reply
+    // text comes via outputTranscription below. Audio is PLAYED only in
+    // voice-output modes; text-output modes stay silent and show the transcript.
+    const outMode = (state.get('mode') || {}).output;
     const parts = sc.modelTurn && sc.modelTurn.parts;
     if (parts && parts.length) {
       for (const part of parts) {
         const inline = part.inlineData;
         if (inline && inline.data && typeof inline.mimeType === 'string' &&
             inline.mimeType.startsWith('audio/pcm')) {
-          enqueuePlayback(inline.data);
-        } else if (typeof part.text === 'string' && part.text) {
-          modelBuf += part.text;
-          emitTranscript('gzowo', modelBuf, false);
+          if (outMode === 'voice') enqueuePlayback(inline.data);
         }
       }
     }

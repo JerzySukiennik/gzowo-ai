@@ -26,7 +26,7 @@ export const CONFIG = {
 
   // --- Gemini (brain + voice, Live native audio) ---
   gemini: {
-    model: 'gemini-2.5-flash-preview-native-audio-dialog',
+    model: 'gemini-2.5-flash-native-audio-latest',
     voiceName: 'Schedar',                 // timbre chosen by Jurek
     apiKeyDirect: ''                      // ⚠️ ALWAYS empty — key is in bridge/.env + Worker, NEVER here
   },
