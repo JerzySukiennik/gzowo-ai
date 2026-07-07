@@ -1,8 +1,10 @@
-# Secrets — real keys live here, never in git
-config.js
+# Secrets — real keys live here, NEVER in git
 bridge/.env
 .env
 worker/.dev.vars
+
+# NOTE: config.js IS committed on purpose — it holds only PUBLIC-SAFE values
+# (Firebase web config + empty secret slots). The Gemini key never goes there.
 
 # Deps + OS junk
 node_modules/
