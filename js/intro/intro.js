@@ -223,6 +223,8 @@ class Ceremony {
     this.ctrl = new AbortController();
     this.signal = this.ctrl.signal;
     this.skipArmed = false;
+    // Login removed by default (CONFIG.skipLogin). Boot straight to the UI.
+    this.noLogin = !(window.GZOWO_CONFIG && window.GZOWO_CONFIG.skipLogin === false);
     this._buildDom();
   }
 
@@ -391,9 +393,23 @@ class Ceremony {
     const short = seen || this.reduced;
     const instant = short; // no typewriter in the short/reduced timeline
 
-    if (demo) this.demoBadge.hidden = false;
+    if (demo && !this.noLogin) this.demoBadge.hidden = false;
 
     try {
+      // ---- LOGIN REMOVED: boot straight into the interface ----
+      if (this.noLogin) {
+        this.userField.field.hidden = true;
+        this.passField.field.hidden = true;
+        if (!short) await wait(500, this.signal);
+        await typewriter(this.osline, 'GZOWO OS v1.0', 26, this.signal, instant);
+        await this._promptLine('SYSTEM ONLINE', instant);
+        await wait(short ? 300 : 800, this.signal).catch(rethrowAbort);
+        this.console.hidden = true;
+        await this._ignition(short);
+        await this._handoff();
+        return;
+      }
+
       // ---- (1) IDENTIFY ----
       if (!short) {
         await wait(600, this.signal);                       // black silence

@@ -20,6 +20,10 @@ export const CONFIG = {
   // Your Firebase user must be created with the SAME email (e.g. jurek@gzowo.ai).
   auth: { emailDomain: 'gzowo.ai' },
 
+  // --- Login REMOVED: boot straight into the interface; memory stays local ---
+  skipLogin: true,
+  forceDemo: true,
+
   // --- Gemini (brain + voice, Live native audio) ---
   gemini: {
     model: 'gemini-2.5-flash-preview-native-audio-dialog',
