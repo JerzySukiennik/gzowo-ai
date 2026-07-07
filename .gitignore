@@ -9,3 +9,6 @@ worker/.dev.vars
 # Deps + OS junk
 node_modules/
 .DS_Store
+
+# Vosk wake-word model (~53MB) — served locally by the bridge, never in git
+models/

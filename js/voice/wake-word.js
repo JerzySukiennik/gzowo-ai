@@ -1,132 +1,161 @@
 // js/voice/wake-word.js — voice-owned. On-device wake word ("Hej Gzowo") via
-// Porcupine (fully local WASM). Audio NEVER leaves the device until the keyword
-// fires. Honest off-state when unconfigured; privacy toggle unsubscribes the mic.
+// Vosk (fully local WASM keyword-spotting). Audio NEVER leaves the device.
+//
+// Why Vosk and not Porcupine: Picovoice discontinued its free tier on 2026-06-30,
+// so Porcupine is now paid/commercial. Vosk is free, offline, no account. We run
+// it in keyword-spotting mode (grammar limited to the wake phrases + [unk]) which
+// is fast and accurate for a distinctive word like "Gzowo".
+//
+// The Polish model (~53MB) is served locally by the bridge (CONFIG.vosk.modelUrl);
+// on the deployed site without a bridge the model isn't reachable -> honest WAKE OFF.
+//
+// Mic coordination: the wake listener holds the mic only while IDLE. When a Gemini
+// voice session opens (state -> talking) we RELEASE the mic so GŁOS→GŁOS gets it
+// cleanly (no contention, no self-trigger on Gzowo's own voice); we re-acquire it
+// when we fall back to idle.
 //
 // GLOBAL RULES: logic only; English comments; secrets via CONFIG; honest failure
-// (no toast spam here — HUD shows WAKE OFF), single subscribe pipeline.
+// (no toast spam — HUD shows WAKE OFF); graceful degradation everywhere.
 
-import { PorcupineWorker } from '@picovoice/porcupine-web';
-import { WebVoiceProcessor } from '@picovoice/web-voice-processor';
 import { bus } from '../core/event-bus.js';
 import { state } from '../core/state-manager.js';
 
 const CONFIG = window.GZOWO_CONFIG;
+const VOSK_ESM = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/+esm';
 
-let worker = null;         // PorcupineWorker instance
-let subscribed = false;    // is the worker currently attached to the mic?
-let unsubWake = null;      // state.subscribe('wakeEnabled') unsubscriber
+let model = null;          // loaded Vosk model (expensive; kept for the session)
+let grammar = null;        // JSON grammar string (keywords + [unk])
+let keywords = [];         // lowercased wake phrases
+let recognizer = null;     // current KaldiRecognizer (tied to a sample rate)
+let audioCtx = null;       // AudioContext feeding the recognizer
+let micStream = null;      // mic MediaStream (only while listening)
+let sourceNode = null;
+let procNode = null;
+
+let listening = false;     // mic acquired + feeding the recognizer?
+let busy = false;          // guard against overlapping start/stop
+let lastWake = 0;          // debounce repeated detections
+
+const WAKE_DEBOUNCE_MS = 2500;
 
 /**
- * Idempotent init. Loads Porcupine if configured + keyword files reachable;
- * otherwise reports an honest OFF state (no toast spam). Never throws.
+ * Idempotent init. Loads the Vosk model if reachable; otherwise honest WAKE OFF.
+ * Never throws.
  */
 export async function init() {
-  // Capability flag: only ever true once a real Porcupine worker exists. The HUD
-  // gates the WAKE toggle on this so the user can't flip it to a lying "WAKE ON"
-  // when nothing is actually listening. Off by default (device-local, not a
-  // persisted user pref).
+  // Capability flag the HUD gates its WAKE toggle on. Off until a model is live.
   state.set('wakeAvailable', false);
   try {
-    const pv = (CONFIG && CONFIG.porcupine) || {};
-    const keywords = Array.isArray(pv.keywords) ? pv.keywords : [];
+    const vk = (CONFIG && CONFIG.vosk) || {};
+    const modelUrl = vk.modelUrl || '/models/vosk-pl.tar.gz';
+    keywords = (Array.isArray(vk.keywords) && vk.keywords.length ? vk.keywords : ['hej gzowo', 'ok gzowo', 'gzowo'])
+      .map((k) => String(k).toLowerCase());
 
-    // Honest off #1: no access key or no keywords configured.
-    if (!pv.accessKey || keywords.length === 0) {
-      console.warn('[wake-word] Porcupine not configured (no accessKey/keywords) — WAKE OFF');
-      markUnavailable();
+    // Honest off: model file not reachable (no bridge / not deployed with it).
+    let reachable = false;
+    try { const r = await fetch(modelUrl, { method: 'HEAD' }); reachable = r.ok; } catch (_e) { reachable = false; }
+    if (!reachable) {
+      console.warn('[wake-word] Vosk model not reachable at ' + modelUrl + ' — WAKE OFF (odpal most, żeby mieć "Hej Gzowo").');
       return;
     }
 
-    // Honest off #2: at least one keyword model file is missing (HEAD check).
-    const allPresent = await keywordsReachable(keywords);
-    if (!allPresent) {
-      console.warn('[wake-word] keyword .ppn file missing on publicPath — WAKE OFF');
-      markUnavailable();
-      return;
-    }
+    const { createModel } = await import(VOSK_ESM);
+    model = await createModel(modelUrl);
+    grammar = JSON.stringify([...keywords, '[unk]']);
 
-    worker = await PorcupineWorker.create(
-      pv.accessKey,
-      keywords.map((k) => ({ label: k.label, publicPath: k.publicPath })),
-      detectionCallback
-    );
-
-    // Attach to the mic and mark enabled + available.
-    await subscribeMic();
+    // Model is live: expose the capability. Listening stays OFF until the user
+    // flips the HUD WAKE toggle (so we never grab the mic behind their back).
     state.set('wakeAvailable', true);
-    state.set('wakeEnabled', true);
+    if (state.get('wakeEnabled') === true) await startListening();
 
-    // Privacy toggle: HUD flips wakeEnabled -> attach/detach the mic accordingly.
-    unsubWake = state.subscribe('wakeEnabled', async (enabled) => {
+    // Privacy toggle: enable -> acquire mic + listen; disable -> release mic.
+    state.subscribe('wakeEnabled', async (enabled) => {
+      try { if (enabled) await startListening(); else await stopListening(); }
+      catch (err) { console.error('[wake-word] toggle failed', err); }
+    });
+
+    // Release the mic while a voice session is live; re-acquire back at idle.
+    bus.on('state:change', async ({ to }) => {
       try {
-        if (enabled) await subscribeMic();
-        else await unsubscribeMic();
-      } catch (err) {
-        console.error('[wake-word] toggle failed', err);
-      }
+        if (to === 'talking') await stopListening();
+        else if (to === 'idle' && state.get('wakeEnabled') === true) await startListening();
+      } catch (err) { console.error('[wake-word] state coordination failed', err); }
     });
   } catch (err) {
-    // Any load failure -> honest off, no user-facing toast (HUD shows WAKE OFF).
-    console.warn('[wake-word] init failed — WAKE OFF', err);
-    markUnavailable();
+    console.warn('[wake-word] Vosk init failed — WAKE OFF', err);
+    state.set('wakeAvailable', false);
   }
 }
 
-/**
- * Mark wake-word as unavailable WITHOUT clobbering the user's persisted
- * wakeEnabled preference. Capability ('wakeAvailable') is a device-local signal;
- * the HUD renders/enables the toggle off it. We deliberately do NOT force
- * wakeEnabled=false here — otherwise opening the app on a device without the .ppn
- * would silently wipe a WAKE-ON preference synced from another device.
- */
-function markUnavailable() {
-  state.set('wakeAvailable', false);
+/** Acquire the mic and start feeding the recognizer. Idempotent + guarded. */
+async function startListening() {
+  if (!model || listening || busy) return;
+  busy = true;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') { try { await audioCtx.resume(); } catch (_e) { /* ignore */ } }
+
+    recognizer = new model.KaldiRecognizer(audioCtx.sampleRate, grammar);
+    recognizer.on('result', (msg) => {
+      const text = (msg && msg.result && msg.result.text ? msg.result.text : '').toLowerCase();
+      if (matches(text)) fireWake();
+    });
+    recognizer.on('partialresult', (msg) => {
+      const text = (msg && msg.result && msg.result.partial ? msg.result.partial : '').toLowerCase();
+      if (matches(text)) fireWake();
+    });
+
+    sourceNode = audioCtx.createMediaStreamSource(micStream);
+    // ScriptProcessor is deprecated but universally supported and dead-simple for
+    // a wake listener; the recognizer resamples from the context rate internally.
+    procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+    procNode.onaudioprocess = (e) => {
+      if (!recognizer) return;
+      try { recognizer.acceptWaveform(e.inputBuffer); } catch (_e) { /* transient */ }
+    };
+    sourceNode.connect(procNode);
+    procNode.connect(audioCtx.destination); // must be in the graph to pull audio
+    listening = true;
+  } catch (err) {
+    console.warn('[wake-word] startListening failed (mic?)', err);
+    await teardown();
+  } finally {
+    busy = false;
+  }
 }
 
-/**
- * Porcupine detection callback. Fires only on a local keyword match; only then
- * does anything leave the device (a wake event, not audio).
- * @param {{label:string, index:number}} _detection
- */
-function detectionCallback(_detection) {
+/** Release the mic + tear down the audio graph (recognizer is recreated on next start). */
+async function stopListening() {
+  if (busy && !listening) return;
+  await teardown();
+}
+
+async function teardown() {
+  listening = false;
+  try { if (procNode) procNode.onaudioprocess = null; } catch (_e) { /* ignore */ }
+  try { procNode && procNode.disconnect(); } catch (_e) { /* ignore */ }
+  try { sourceNode && sourceNode.disconnect(); } catch (_e) { /* ignore */ }
+  try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch (_e) { /* ignore */ }
+  try { if (recognizer && recognizer.remove) recognizer.remove(); } catch (_e) { /* ignore */ }
+  try { audioCtx && audioCtx.close(); } catch (_e) { /* ignore */ }
+  procNode = null; sourceNode = null; micStream = null; recognizer = null; audioCtx = null;
+}
+
+/** True if the recognized text contains any wake phrase (or the bare name). */
+function matches(text) {
+  if (!text) return false;
+  if (text.includes('gzowo')) return true; // distinctive enough on its own
+  return keywords.some((k) => text.includes(k));
+}
+
+/** Emit the wake event (debounced), letting gemini-live open the session. */
+function fireWake() {
+  const now = Date.now();
+  if (now - lastWake < WAKE_DEBOUNCE_MS) return;
+  lastWake = now;
   bus.emit('sound:play', { name: 'wake' });
   bus.emit('voice:wake', {});
-}
-
-/** Attach the worker to the shared WebVoiceProcessor mic pipeline. */
-async function subscribeMic() {
-  if (!worker || subscribed) return;
-  await WebVoiceProcessor.subscribe(worker);
-  subscribed = true;
-}
-
-/** Detach from the mic — audio pipeline stops flowing to Porcupine (privacy). */
-async function unsubscribeMic() {
-  if (!worker || !subscribed) return;
-  await WebVoiceProcessor.unsubscribe(worker);
-  subscribed = false;
-}
-
-/**
- * HEAD-check every keyword model file so we degrade honestly if one is absent.
- * @param {Array<{publicPath:string}>} keywords
- * @returns {Promise<boolean>} true only if ALL files respond OK.
- */
-async function keywordsReachable(keywords) {
-  try {
-    const checks = await Promise.all(
-      keywords.map(async (k) => {
-        if (!k || !k.publicPath) return false;
-        try {
-          const res = await fetch(k.publicPath, { method: 'HEAD' });
-          return res.ok;
-        } catch (_e) {
-          return false;
-        }
-      })
-    );
-    return checks.every(Boolean);
-  } catch (_e) {
-    return false;
-  }
 }

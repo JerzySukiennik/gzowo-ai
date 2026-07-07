@@ -31,12 +31,13 @@ export const CONFIG = {
     apiKeyDirect: ''                      // ⚠️ ALWAYS empty — key is in bridge/.env + Worker, NEVER here
   },
 
-  // --- Porcupine (wake word "Hej Gzowo") — paste AccessKey when ready ---
-  porcupine: {
-    accessKey: '',                        // Picovoice Console AccessKey (empty = WAKE OFF, honest)
-    keywords: [
-      { label: 'Hej Gzowo', publicPath: 'assets/wake/hej-gzowo.ppn' }
-    ]
+  // --- Wake word "Hej Gzowo" via Vosk (free, offline, no account) ---
+  // Porcupine's free tier ended 2026-06-30, so we use Vosk keyword-spotting.
+  // The ~53MB Polish model is served locally by the bridge (models/vosk-pl.tar.gz);
+  // with no bridge (deployed) it's unreachable -> honest WAKE OFF.
+  vosk: {
+    modelUrl: '/models/vosk-pl.tar.gz',
+    keywords: ['hej gzowo', 'ok gzowo', 'gzowo']
   },
 
   // --- Bridge (local Node on Mac: projects, whisper, token minting) ---
