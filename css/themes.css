@@ -1,0 +1,92 @@
+/* css/themes.css — Blueprint theme EXTRAS only. The grid density + line tokens
+   already flip in design-tokens.css via [data-theme='blueprint']; this sheet
+   adds the visible "densified / drafting" flourishes. All grayscale, subtle,
+   and static (background-image / borders only) — zero animation, zero per-frame
+   cost. Mono theme adds nothing here (clean default). */
+
+/* -------------------------------------------------------------------------
+   Widget corner tick marks — 8px L-shapes in the four corners, drafting style.
+   Rendered with gradients so a single ::before/::after pair covers two corners
+   each (no extra DOM). Color only ever grayscale (--line-bright).
+   ------------------------------------------------------------------------- */
+[data-theme='blueprint'] .widget {
+  position: relative;
+}
+[data-theme='blueprint'] .widget::before,
+[data-theme='blueprint'] .widget::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+}
+/* top-left corner tick */
+[data-theme='blueprint'] .widget::before {
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid var(--line-bright);
+  border-left: 1px solid var(--line-bright);
+}
+/* bottom-right corner tick */
+[data-theme='blueprint'] .widget::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1px solid var(--line-bright);
+  border-right: 1px solid var(--line-bright);
+}
+
+/* Second pair of ticks (top-right + bottom-left) via the widget header, which
+   the layout engine always renders. Keeps all four corners marked with no
+   extra elements of our own. */
+[data-theme='blueprint'] .widget .widget-head {
+  position: relative;
+}
+[data-theme='blueprint'] .widget .widget-head::before,
+[data-theme='blueprint'] .widget .widget-head::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  pointer-events: none;
+}
+[data-theme='blueprint'] .widget .widget-head::before {
+  top: -1px;
+  right: -1px;
+  border-top: 1px solid var(--line-bright);
+  border-right: 1px solid var(--line-bright);
+}
+[data-theme='blueprint'] .widget .widget-head::after {
+  /* anchor to the widget's bottom-left via a tall offset from the header */
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid var(--line-bright);
+  border-left: 1px solid var(--line-bright);
+}
+
+/* -------------------------------------------------------------------------
+   HUD + dock double-line borders — a second hairline just inside the primary
+   border reads as the denser drafting chrome from sketch #3.
+   ------------------------------------------------------------------------- */
+[data-theme='blueprint'] #hud-top {
+  box-shadow: inset 0 -3px 0 -2px var(--line);
+}
+[data-theme='blueprint'] #dock {
+  box-shadow: inset 0 3px 0 -2px var(--line);
+}
+
+/* -------------------------------------------------------------------------
+   Faint crosshair center marks on the grid background — a big, quiet
+   drafting crosshair at screen center, layered UNDER the existing grid image.
+   Static background gradients only, so no repaint cost.
+   ------------------------------------------------------------------------- */
+[data-theme='blueprint'] #grid-bg {
+  background-image:
+    /* center crosshair: one vertical + one horizontal faint band */
+    linear-gradient(to right, transparent calc(50% - 0.5px), var(--grid-line) calc(50% - 0.5px), var(--grid-line) calc(50% + 0.5px), transparent calc(50% + 0.5px)),
+    linear-gradient(to bottom, transparent calc(50% - 0.5px), var(--grid-line) calc(50% - 0.5px), var(--grid-line) calc(50% + 0.5px), transparent calc(50% + 0.5px)),
+    /* existing vignette + line grid (kept from base.css, denser via token) */
+    radial-gradient(ellipse at center, transparent 40%, rgba(0, 0, 0, 0.5) 100%),
+    repeating-linear-gradient(to right,  var(--grid-line) 0, var(--grid-line) 1px, transparent 1px, transparent var(--grid-size)),
+    repeating-linear-gradient(to bottom, var(--grid-line) 0, var(--grid-line) 1px, transparent 1px, transparent var(--grid-size));
+  background-position: center center;
+}

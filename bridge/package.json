@@ -1,0 +1,14 @@
+{
+  "name": "gzowo-bridge",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@google/genai": "^1.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

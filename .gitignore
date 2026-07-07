@@ -1,0 +1,9 @@
+# Secrets — real keys live here, never in git
+config.js
+bridge/.env
+.env
+worker/.dev.vars
+
+# Deps + OS junk
+node_modules/
+.DS_Store

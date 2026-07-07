@@ -1,0 +1,31 @@
+# worker/wrangler.toml — konfiguracja Cloudflare Workera dla Gzowo.
+# Worker mintuje krótkożyciowe tokeny Gemini (klucz zostaje po stronie serwera)
+# i robi mały proxy CORS dla publicznych API. Używany, gdy nie ma mostu (apka
+# wrzucona na sieć / telefon poza domem).
+
+name = "gzowo-worker"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+# Dozwolone originy (CORS). '*' to placeholder wygodny na start (token i tak jest
+# jednorazowy i zablokowany server-side). Dla prywatnego deployu wpisz DOKŁADNY
+# origin swojej strony, np. "https://jerzysukiennik.github.io".
+ALLOWED_ORIGINS = "*"
+
+# ------------------------------------------------------------------------------
+# JAK ZDEPLOYOWAĆ (z katalogu worker/):
+#
+#   1. Zaloguj się do Cloudflare (raz):
+#        npx wrangler login
+#
+#   2. Wgraj sekret z kluczem Gemini (NIE trzymamy go w tym pliku!):
+#        npx wrangler secret put GEMINI_API_KEY
+#      (wklej klucz, gdy zapyta — trafia do szyfrowanego store Cloudflare)
+#
+#   3. Zdeployuj Workera:
+#        npx wrangler deploy
+#
+#   4. Skopiuj URL Workera z outputu (np. https://gzowo-worker.<konto>.workers.dev)
+#      i wklej go do config.js jako CONFIG.worker.url.
+# ------------------------------------------------------------------------------

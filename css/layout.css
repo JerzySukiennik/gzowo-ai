@@ -1,0 +1,111 @@
+/* css/layout.css — layout-owned, FINAL.
+   Chrome for the widget frames the layout engine positions. STRICT B&W:
+   every color/size/timing here comes from design-tokens.css. Real color is
+   forbidden — it belongs ONLY inside .widget-body (filled by each widget).
+
+   Positioning contract: the engine sets left/top/width/height INLINE (px) on
+   each .widget BEFORE running Web-Animations. FLIP glides use transforms only,
+   so nothing here may set transform/transition on .widget — the engine owns
+   motion. We keep the box flat and GPU-friendly (will-change on transform). */
+
+/* The layer is click-transparent; each widget re-enables pointer events.
+   (base.css already sets #widget-layer inset/z/pointer-events — restated here
+   defensively so this sheet is self-describing without fighting the cascade.) */
+#widget-layer {
+  pointer-events: none;
+}
+
+.widget {
+  position: fixed;               /* left/top/width/height set inline by engine */
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--widget-radius);
+  color: var(--fg);
+  /* Flat by design — no glow/shadow on the frame. */
+  will-change: transform, opacity;
+  /* transform-origin center so pulse/trash scaling stays visually centered. */
+  transform-origin: center center;
+  contain: layout paint;         /* isolate reflow/paint to each widget box */
+}
+
+/* Header — mono, uppercase, wide tracking, hairline divider under it. */
+.widget-head {
+  height: 28px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-dim);
+  font: 500 var(--text-xs)/1 var(--font-mono);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  user-select: none;
+}
+
+/* Title text truncates instead of pushing the controls off-frame. */
+.widget-head .widget-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Control cluster (pin + close) hugs the right. */
+.widget-head .widget-controls {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.widget-head button {
+  all: unset;
+  cursor: pointer;
+  color: var(--fg-faint);
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: var(--widget-radius);
+  transition: color var(--t-fast) var(--ease-out);
+}
+.widget-head button:hover,
+.widget-head button:focus-visible {
+  color: var(--fg);
+}
+.widget-head button:focus-visible {
+  outline: 1px solid var(--fg-dim);
+  outline-offset: 1px;
+}
+
+/* Pinned marker — small square before the title, B&W only. */
+.widget.is-pinned .widget-head::before {
+  content: '▪';
+  margin-right: var(--space-1);
+  color: var(--fg);
+  flex: 0 0 auto;
+}
+/* Active state of the pin control reads as "on". */
+.widget.is-pinned .widget-pin {
+  color: var(--fg);
+}
+
+/* Body — the ONLY place color is allowed. Chrome stays neutral. */
+.widget-body {
+  flex: 1 1 auto;
+  min-height: 0;                 /* let flex child scroll instead of overflowing */
+  overflow: auto;
+  padding: var(--space-4);
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+/* Respect reduced-motion: the engine also checks this in JS, but if any UA
+   ignores WAAPI options we at least neutralize hover transitions. */
+@media (prefers-reduced-motion: reduce) {
+  .widget-head button { transition: none; }
+}

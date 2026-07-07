@@ -1,0 +1,753 @@
+// js/voice/gemini-live.js — voice-owned. Manages ONE Gemini Live (native audio)
+// session end-to-end: token chain, connect, streaming audio in/out, transcripts,
+// tool calls, session resumption + goAway reconnect, mute, silence policy, and
+// the public control surface (voice:toggle / voice:wake / chat:send / mode:change).
+//
+// GLOBAL RULES honored here: logic only (no DOM/color); English comments, PL toasts
+// in Edek tone; secrets only via CONFIG/bridge; every failure path = honest toast,
+// never fake; one AudioWorklet, reused buffers in hot paths (no per-frame allocs).
+
+import { GoogleGenAI, Modality } from '@google/genai';
+import { bus } from '../core/event-bus.js';
+import { state } from '../core/state-manager.js';
+import { bridgeClient } from '../bridge-client.js';
+import { memory } from '../memory/firebase.js';
+import { PERSONA, TOOLS } from './persona.js';
+
+const CONFIG = window.GZOWO_CONFIG;
+
+// ---- Module singletons ------------------------------------------------------
+let ai = null;                 // GoogleGenAI instance
+let session = null;            // active Live session
+let sessionEpoch = 0;          // bumped per connect; callbacks ignore stale epochs
+let connecting = false;        // guard against concurrent connects
+let resumptionHandle = null;   // last session resumption handle (RAM only)
+let retriedOnce = false;       // one auto-retry budget per unexpected drop
+let goAwayTimer = null;        // scheduled transparent reconnect timer
+
+// ---- Audio IN (mic -> PCM16 -> Gemini) --------------------------------------
+let inCtx = null;              // AudioContext @16k
+let micStream = null;          // MediaStream from getUserMedia
+let micSource = null;          // MediaStreamAudioSourceNode
+let workletNode = null;        // AudioWorkletNode capturing Float32 chunks
+let workletUrl = null;         // Blob URL for the inline worklet
+
+// ---- Audio OUT (Gemini PCM -> speakers) -------------------------------------
+let outCtx = null;             // AudioContext @24k
+let outGain = null;            // master gain (mute)
+let analyser = null;           // AnalyserNode for out amplitude
+let analyserData = null;       // reused Float32Array for analyser reads
+let nextStartTime = 0;         // gapless scheduling bookkeeping (outCtx time)
+let scheduledSources = new Set(); // live BufferSourceNodes (for interrupt flush)
+let outRafId = 0;              // rAF handle for the out-amplitude loop
+
+// ---- Transcript accumulation ------------------------------------------------
+let userBuf = '';              // accumulates input transcription until turnComplete
+let modelBuf = '';             // accumulates output transcription until turnComplete
+
+// ---- Silence policy ---------------------------------------------------------
+let lastAudioAt = 0;           // timestamp of last user OR model audio activity
+let silenceTimer = 0;          // setInterval handle
+const SILENCE_MS = 45000;      // 45s of no audio while talking -> close to idle
+
+// ---- Unsubscribers ----------------------------------------------------------
+let unsubMuted = null;
+
+/**
+ * Idempotent module init. Wires the public control surface. Never throws.
+ */
+export async function init() {
+  try {
+    bus.on('voice:toggle', onToggle);
+    bus.on('voice:wake', onWake);
+    bus.on('chat:send', onChatSend);
+    bus.on('mode:change', onModeChange);
+    // Reflect mute changes onto the output gain in real time.
+    unsubMuted = state.subscribe('muted', applyMute);
+  } catch (err) {
+    console.error('[gemini-live] init failed', err);
+  }
+}
+
+// ============================================================================
+//  TOKEN CHAIN + CONNECT
+// ============================================================================
+
+/**
+ * Resolve credentials and build the GoogleGenAI client.
+ * @returns {Promise<boolean>} true if a client is ready, false if honestly off.
+ */
+async function ensureClient() {
+  if (ai) return true;
+
+  let auth = null;
+  try {
+    auth = await bridgeClient.getToken();
+  } catch (_e) {
+    auth = null; // bridge/worker unreachable — fall through to direct key / off
+  }
+
+  // Preferred: ephemeral token minted by bridge/worker (key never in browser).
+  if (auth && auth.token) {
+    ai = new GoogleGenAI({ apiKey: auth.token, httpOptions: { apiVersion: 'v1alpha' } });
+    return true;
+  }
+
+  // Dev fallback: raw apiKey from bridge response OR CONFIG.gemini.apiKeyDirect.
+  const directKey =
+    (auth && auth.apiKey) ||
+    (CONFIG && CONFIG.gemini && CONFIG.gemini.apiKeyDirect) ||
+    '';
+  if (directKey) {
+    bus.emit('toast', {
+      text: 'Lecę na gołym kluczu (dev) — do sieci tylko przez Workera.',
+      kind: 'warn'
+    });
+    ai = new GoogleGenAI({ apiKey: directKey, httpOptions: { apiVersion: 'v1alpha' } });
+    return true;
+  }
+
+  // Honest off — no key anywhere. Do not fake a session.
+  setStatus('off');
+  bus.emit('toast', {
+    text: 'Głos niedostępny — brak klucza. Uzupełnij config.js albo odpal most.',
+    kind: 'warn'
+  });
+  return false;
+}
+
+/**
+ * Open (or reopen) the single Live session. Optionally resume via handle.
+ * @param {{handle?: string}} [opts]
+ */
+async function connect(opts = {}) {
+  if (session || connecting) return;
+  connecting = true;
+  // New epoch: any callback from a previously-torn-down session is now stale
+  // and will be ignored, which kills the deliberate-close vs auto-retry race.
+  const epoch = ++sessionEpoch;
+  setStatus('connecting');
+
+  const ready = await ensureClient();
+  if (!ready) {
+    connecting = false;
+    return; // ensureClient already reported honest off-state
+  }
+
+  const mode = state.get('mode') || { input: 'voice', output: 'voice' };
+  const wantAudioOut = mode.output === 'voice';
+
+  // Build system instruction with the persona + freshly loaded facts about Jurek.
+  let facts = [];
+  try {
+    facts = (await memory.loadFacts()) || [];
+  } catch (_e) {
+    facts = [];
+  }
+  const factBlock = facts.length
+    ? '\n\nFAKTY O JURKU:\n' + facts.map((f) => '- ' + f).join('\n')
+    : '';
+
+  const config = {
+    responseModalities: [wantAudioOut ? Modality.AUDIO : Modality.TEXT],
+    speechConfig: {
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: CONFIG.gemini.voiceName } }
+    },
+    systemInstruction: PERSONA + factBlock,
+    tools: TOOLS,
+    inputAudioTranscription: {},
+    outputAudioTranscription: {},
+    sessionResumption: opts.handle ? { handle: opts.handle } : {},
+    contextWindowCompression: { slidingWindow: {} }
+  };
+
+  try {
+    session = await ai.live.connect({
+      model: CONFIG.gemini.model,
+      config,
+      callbacks: {
+        onopen: () => { if (epoch === sessionEpoch) handleOpen(); },
+        onmessage: (m) => { if (epoch === sessionEpoch) handleMessage(m); },
+        onerror: (e) => { if (epoch === sessionEpoch) handleError(e); },
+        onclose: (e) => { if (epoch === sessionEpoch) handleClose(e); }
+      }
+    });
+  } catch (err) {
+    console.error('[gemini-live] connect failed', err);
+    connecting = false;
+    session = null;
+    setStatus('error', String(err && err.message ? err.message : err));
+    bus.emit('toast', { text: 'Nie wpiąłem się w mózg — sprawdź klucz i sieć.', kind: 'warn' });
+    return;
+  }
+
+  connecting = false;
+}
+
+// ============================================================================
+//  SESSION CALLBACKS
+// ============================================================================
+
+function handleOpen() {
+  retriedOnce = false;
+  setStatus('open');
+
+  // Start audio pipelines per current mode.
+  const mode = state.get('mode') || { input: 'voice', output: 'voice' };
+  if (mode.output === 'voice') startAudioOut();
+  if (mode.input === 'voice') startAudioIn().catch((e) => console.error('[gemini-live] mic', e));
+
+  // Session opening implies we're now in a conversation.
+  if (state.ui === 'idle') state.setUI('talking', 'voice');
+
+  // Arm the silence watchdog.
+  bumpAudioActivity();
+  startSilenceWatch();
+}
+
+/**
+ * @param {import('@google/genai').LiveServerMessage} message
+ */
+function handleMessage(message) {
+  if (!message) return;
+
+  // ---- goAway: server will drop us soon -> schedule transparent reconnect ----
+  if (message.goAway) {
+    scheduleReconnect(message.goAway.timeLeft);
+  }
+
+  // ---- sessionResumptionUpdate: stash the handle in RAM ----
+  if (message.sessionResumptionUpdate) {
+    const upd = message.sessionResumptionUpdate;
+    if (upd.resumable && upd.newHandle) resumptionHandle = upd.newHandle;
+  }
+
+  // ---- serverContent: audio, transcripts, turn lifecycle ----
+  const sc = message.serverContent;
+  if (sc) {
+    // Interruption: model was cut off -> flush the playback queue instantly.
+    if (sc.interrupted) flushPlayback();
+
+    // Model audio AND inline text parts. In TEXT-output mode Gemini returns the
+    // reply as modelTurn.parts[].text (and does NOT populate outputTranscription,
+    // which only transcribes generated AUDIO). Read both so text-output modes
+    // (GŁOS→TEKST, TEKST→TEKST) actually surface Gzowo's answer.
+    const parts = sc.modelTurn && sc.modelTurn.parts;
+    if (parts && parts.length) {
+      for (const part of parts) {
+        const inline = part.inlineData;
+        if (inline && inline.data && typeof inline.mimeType === 'string' &&
+            inline.mimeType.startsWith('audio/pcm')) {
+          enqueuePlayback(inline.data);
+        } else if (typeof part.text === 'string' && part.text) {
+          modelBuf += part.text;
+          emitTranscript('gzowo', modelBuf, false);
+        }
+      }
+    }
+
+    // Transcripts accumulate; finalize on turnComplete.
+    if (sc.inputTranscription && sc.inputTranscription.text) {
+      userBuf += sc.inputTranscription.text;
+      emitTranscript('user', userBuf, false);
+    }
+    if (sc.outputTranscription && sc.outputTranscription.text) {
+      modelBuf += sc.outputTranscription.text;
+      emitTranscript('gzowo', modelBuf, false);
+    }
+
+    if (sc.turnComplete) {
+      if (userBuf) {
+        emitTranscript('user', userBuf, true);
+        memory.appendTranscript({ role: 'user', text: userBuf, ts: Date.now() });
+        userBuf = '';
+      }
+      if (modelBuf) {
+        emitTranscript('gzowo', modelBuf, true);
+        memory.appendTranscript({ role: 'gzowo', text: modelBuf, ts: Date.now() });
+        modelBuf = '';
+      }
+    }
+  }
+
+  // ---- toolCall: fan out to UI + always ack so the model can continue ----
+  if (message.toolCall && Array.isArray(message.toolCall.functionCalls)) {
+    const calls = message.toolCall.functionCalls;
+    for (const c of calls) {
+      bus.emit('assistant:tool', { name: c.name, args: c.args || {} });
+      // Local intent handled here (session lifecycle) — UI does the rest.
+      if (c.name === 'end_conversation') scheduleGracefulEnd();
+    }
+    try {
+      session && session.sendToolResponse({
+        functionResponses: calls.map((c) => ({ id: c.id, name: c.name, response: { ok: true } }))
+      });
+    } catch (err) {
+      console.error('[gemini-live] tool response failed', err);
+    }
+  }
+}
+
+/**
+ * @param {ErrorEvent|Error} err
+ */
+function handleError(err) {
+  console.error('[gemini-live] session error', err);
+  setStatus('error', String(err && err.message ? err.message : err));
+}
+
+/**
+ * Only fires for the CURRENT session (epoch-guarded) and only when we did NOT
+ * close it deliberately (deliberate closes bump the epoch first -> their onclose
+ * is stale and filtered out). So every call here is a genuinely unexpected drop.
+ * @param {CloseEvent} [ev]
+ */
+function handleClose(ev) {
+  teardownSession();
+
+  // Unexpected drop: one transparent retry using the resumption handle.
+  if (!retriedOnce) {
+    retriedOnce = true;
+    setStatus('connecting', 'reconnect');
+    connect({ handle: resumptionHandle || undefined }).catch((e) =>
+      console.error('[gemini-live] reconnect failed', e)
+    );
+    return;
+  }
+
+  // Retry budget spent — be honest.
+  setStatus('closed', ev && ev.reason ? String(ev.reason) : 'dropped');
+  bus.emit('toast', { text: 'Sesja padła i nie wróciła — daj znać, spróbuję od nowa.', kind: 'warn' });
+}
+
+/**
+ * Deliberately close the current session so its late onclose is filtered out by
+ * the epoch guard (never triggers auto-retry). Tears down all session resources.
+ */
+function closeSessionDeliberately() {
+  sessionEpoch++;                       // stale-out this session's pending callbacks
+  const s = session;
+  teardownSession();                    // clears `session`, audio, timers
+  try { s && s.close(); } catch (_e) { /* ignore */ }
+}
+
+// ============================================================================
+//  RECONNECT (goAway) + GRACEFUL END
+// ============================================================================
+
+/**
+ * Schedule a transparent reconnect just before the server's deadline.
+ * @param {string|undefined} timeLeft  ISO-8601 duration string (e.g. "9.5s")
+ */
+function scheduleReconnect(timeLeft) {
+  if (goAwayTimer) return; // already scheduled
+  const ms = parseDurationMs(timeLeft);
+  // Reconnect ~1.5s before the deadline, but never in the past.
+  const delay = Math.max(500, ms - 1500);
+  goAwayTimer = setTimeout(async () => {
+    goAwayTimer = null;
+    const handle = resumptionHandle || undefined;
+    // Close the doomed session ourselves, then reopen resumed — transparent to UI.
+    closeSessionDeliberately();
+    await connect({ handle });
+  }, delay);
+}
+
+/** Close the session gracefully after an end_conversation tool ack. */
+function scheduleGracefulEnd() {
+  // Let the model's farewell audio finish, then close down to idle/showing.
+  const wait = Math.max(0, nextStartTime - (outCtx ? outCtx.currentTime : 0));
+  const ms = Math.min(6000, Math.round(wait * 1000) + 400);
+  setTimeout(() => {
+    closeSessionDeliberately();
+    setStatus('closed');
+    // Contract: showing stays showing, everything else falls to idle. Guard the
+    // same-state case so the state machine doesn't log a spurious ignored-transition.
+    const target = state.ui === 'showing' ? 'showing' : 'idle';
+    if (state.ui !== target) state.setUI(target, 'end_conversation');
+  }, ms);
+}
+
+// ============================================================================
+//  PUBLIC CONTROL
+// ============================================================================
+
+function onToggle() {
+  if (session || connecting) {
+    // Close on toggle.
+    closeSessionDeliberately();
+    setStatus('closed');
+    if (state.ui === 'talking') state.setUI('idle', 'voice:toggle');
+  } else {
+    connect().catch((e) => console.error('[gemini-live] toggle connect', e));
+  }
+}
+
+function onWake() {
+  // Open the session; the wake sound itself is owned by wake-word.js.
+  if (!session && !connecting) {
+    connect().catch((e) => console.error('[gemini-live] wake connect', e));
+  }
+}
+
+/**
+ * @param {{text:string}} payload
+ */
+async function onChatSend(payload) {
+  const text = payload && payload.text;
+  if (!text) return;
+  // Ensure a session exists (text-capable regardless of output modality).
+  if (!session && !connecting) {
+    await connect();
+  }
+  if (!session) return; // honest off already reported by connect/ensureClient
+  try {
+    session.sendClientContent({
+      turns: [{ role: 'user', parts: [{ text }] }],
+      turnComplete: true
+    });
+    bumpAudioActivity(); // count text turns as activity for the silence watch
+  } catch (err) {
+    console.error('[gemini-live] sendClientContent failed', err);
+  }
+}
+
+/**
+ * @param {{input:'voice'|'text', output:'voice'|'text'}} mode
+ */
+function onModeChange(mode) {
+  if (!session || !mode) return;
+  // Output modality is locked at connect time -> reopen if it flipped.
+  const needAudioOut = mode.output === 'voice';
+  const haveAudioOut = !!outCtx;
+  if (needAudioOut !== haveAudioOut) {
+    const handle = resumptionHandle || undefined;
+    closeSessionDeliberately();
+    connect({ handle }).catch((e) => console.error('[gemini-live] mode reopen', e));
+    return;
+  }
+  // Input modality can toggle live: start/stop the mic without reconnecting.
+  if (mode.input === 'voice' && !inCtx) {
+    startAudioIn().catch((e) => console.error('[gemini-live] mic on mode change', e));
+  } else if (mode.input !== 'voice' && inCtx) {
+    stopAudioIn();
+  }
+}
+
+// ============================================================================
+//  AUDIO IN  (mic @16k -> Float32 worklet -> PCM16 base64 -> realtime input)
+// ============================================================================
+
+// Inline AudioWorklet: copies each input block and posts Float32 chunks (~2048).
+// Buffers are reused per-instance; nothing allocated per render quantum beyond
+// the transferred chunk when a buffer fills.
+const WORKLET_SRC = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._buf = new Float32Array(2048);
+    this._n = 0;
+  }
+  process(inputs) {
+    const input = inputs[0];
+    if (!input || input.length === 0) return true;
+    const ch = input[0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this._buf[this._n++] = ch[i];
+      if (this._n === this._buf.length) {
+        // Transfer a copy so the model gets a stable snapshot.
+        const out = this._buf.slice(0);
+        this.port.postMessage(out, [out.buffer]);
+        this._n = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('gzowo-capture', CaptureProcessor);
+`;
+
+async function startAudioIn() {
+  if (inCtx) return; // already running
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+  });
+  inCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  if (inCtx.state === 'suspended') { try { await inCtx.resume(); } catch (_e) { /* ignore */ } }
+
+  if (!workletUrl) {
+    workletUrl = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'application/javascript' }));
+  }
+  await inCtx.audioWorklet.addModule(workletUrl);
+
+  micSource = inCtx.createMediaStreamSource(micStream);
+  workletNode = new AudioWorkletNode(inCtx, 'gzowo-capture');
+  workletNode.port.onmessage = onMicChunk;
+  micSource.connect(workletNode);
+  // Worklet must be in the graph to pull; route to a muted sink (destination is
+  // fine because the node produces no output — process() returns nothing).
+  workletNode.connect(inCtx.destination);
+}
+
+/**
+ * @param {MessageEvent<Float32Array>} ev
+ */
+function onMicChunk(ev) {
+  const f32 = ev.data;
+  if (!f32 || !f32.length) return;
+
+  // RMS for the "in" amplitude meter (orb reacts to this).
+  let sum = 0;
+  for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+  const rms = Math.sqrt(sum / f32.length);
+  emitAmplitude(Math.min(1, rms * 4), 'in');
+
+  if (!session) return;
+  const b64 = floatToPCM16Base64(f32);
+  try {
+    session.sendRealtimeInput({ audio: { data: b64, mimeType: 'audio/pcm;rate=16000' } });
+    bumpAudioActivity();
+  } catch (err) {
+    console.error('[gemini-live] sendRealtimeInput failed', err);
+  }
+}
+
+function stopAudioIn() {
+  try { workletNode && (workletNode.port.onmessage = null); } catch (_e) { /* ignore */ }
+  try { workletNode && workletNode.disconnect(); } catch (_e) { /* ignore */ }
+  try { micSource && micSource.disconnect(); } catch (_e) { /* ignore */ }
+  try { micStream && micStream.getTracks().forEach((t) => t.stop()); } catch (_e) { /* ignore */ }
+  try { inCtx && inCtx.close(); } catch (_e) { /* ignore */ }
+  workletNode = null;
+  micSource = null;
+  micStream = null;
+  inCtx = null;
+}
+
+// ============================================================================
+//  AUDIO OUT  (base64 PCM16 @24k -> gapless scheduled playback + analyser meter)
+// ============================================================================
+
+function startAudioOut() {
+  if (outCtx) return;
+  outCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  if (outCtx.state === 'suspended') { try { outCtx.resume(); } catch (_e) { /* ignore */ } }
+  outGain = outCtx.createGain();
+  analyser = outCtx.createAnalyser();
+  analyser.fftSize = 256;
+  analyserData = new Float32Array(analyser.fftSize);
+  outGain.connect(analyser);
+  analyser.connect(outCtx.destination);
+  applyMute(state.get('muted'));
+  nextStartTime = 0;
+  startOutMeter();
+}
+
+/**
+ * Decode a base64 PCM16 chunk and schedule it gaplessly after the previous one.
+ * @param {string} b64
+ */
+function enqueuePlayback(b64) {
+  if (!outCtx) startAudioOut();
+  const f32 = pcm16Base64ToFloat(b64);
+  if (!f32.length) return;
+
+  const buffer = outCtx.createBuffer(1, f32.length, 24000);
+  buffer.copyToChannel(f32, 0);
+
+  const src = outCtx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(outGain);
+
+  const now = outCtx.currentTime;
+  if (nextStartTime < now) nextStartTime = now;
+  src.start(nextStartTime);
+  nextStartTime += buffer.duration;
+
+  scheduledSources.add(src);
+  src.onended = () => scheduledSources.delete(src);
+
+  bumpAudioActivity();
+}
+
+/** Cut all scheduled output immediately (server-side interruption / barge-in). */
+function flushPlayback() {
+  for (const src of scheduledSources) {
+    try { src.onended = null; src.stop(); } catch (_e) { /* already ended */ }
+  }
+  scheduledSources.clear();
+  nextStartTime = outCtx ? outCtx.currentTime : 0;
+}
+
+function startOutMeter() {
+  if (outRafId) return;
+  const loop = () => {
+    if (!analyser) { outRafId = 0; return; }
+    if (document.hidden) { outRafId = requestAnimationFrame(loop); return; }
+    analyser.getFloatTimeDomainData(analyserData);
+    let sum = 0;
+    for (let i = 0; i < analyserData.length; i++) sum += analyserData[i] * analyserData[i];
+    const rms = Math.sqrt(sum / analyserData.length);
+    emitAmplitude(Math.min(1, rms * 3), 'out');
+    outRafId = requestAnimationFrame(loop);
+  };
+  outRafId = requestAnimationFrame(loop);
+}
+
+function stopAudioOut() {
+  if (outRafId) { cancelAnimationFrame(outRafId); outRafId = 0; }
+  flushPlayback();
+  try { analyser && analyser.disconnect(); } catch (_e) { /* ignore */ }
+  try { outGain && outGain.disconnect(); } catch (_e) { /* ignore */ }
+  try { outCtx && outCtx.close(); } catch (_e) { /* ignore */ }
+  analyser = null;
+  analyserData = null;
+  outGain = null;
+  outCtx = null;
+  nextStartTime = 0;
+}
+
+/**
+ * @param {boolean} muted
+ */
+function applyMute(muted) {
+  if (outGain) outGain.gain.value = muted ? 0 : 1;
+}
+
+// ============================================================================
+//  SILENCE POLICY
+// ============================================================================
+
+function bumpAudioActivity() {
+  lastAudioAt = Date.now();
+}
+
+function startSilenceWatch() {
+  if (silenceTimer) return;
+  silenceTimer = setInterval(() => {
+    if (!session) { stopSilenceWatch(); return; }
+    if (state.ui !== 'talking') return; // only auto-close from a talking idle-out
+    if (Date.now() - lastAudioAt >= SILENCE_MS) {
+      closeSessionDeliberately();       // also clears this interval via teardown
+      setStatus('closed', 'silence');
+      state.setUI('idle', 'silence');
+    }
+  }, 5000);
+}
+
+function stopSilenceWatch() {
+  if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = 0; }
+}
+
+// ============================================================================
+//  TEARDOWN + HELPERS
+// ============================================================================
+
+/** Tear down all per-session resources (keeps `ai` + resumptionHandle). */
+function teardownSession() {
+  session = null;
+  connecting = false;
+  stopSilenceWatch();
+  stopAudioIn();
+  stopAudioOut();
+  userBuf = '';
+  modelBuf = '';
+  if (goAwayTimer) { clearTimeout(goAwayTimer); goAwayTimer = null; }
+}
+
+/**
+ * Emit voice:session status + mirror to state.voiceStatus.
+ * @param {'connecting'|'open'|'closed'|'error'|'off'} status
+ * @param {string} [detail]
+ */
+function setStatus(status, detail) {
+  state.set('voiceStatus', status);
+  bus.emit('voice:session', detail ? { status, detail } : { status });
+}
+
+/**
+ * @param {'user'|'gzowo'} role
+ * @param {string} text
+ * @param {boolean} final
+ */
+function emitTranscript(role, text, final) {
+  bus.emit('voice:transcript', { role, text, final });
+}
+
+/**
+ * @param {number} level  0..1
+ * @param {'in'|'out'} source
+ */
+function emitAmplitude(level, source) {
+  bus.emit('voice:amplitude', { level, source });
+}
+
+/**
+ * Float32 [-1,1] -> PCM16 LE -> base64. Reuses no shared buffers (chunk-local).
+ * @param {Float32Array} f32
+ * @returns {string} base64
+ */
+function floatToPCM16Base64(f32) {
+  const len = f32.length;
+  const pcm = new Int16Array(len);
+  for (let i = 0; i < len; i++) {
+    let s = f32[i];
+    if (s > 1) s = 1; else if (s < -1) s = -1;
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return bytesToBase64(new Uint8Array(pcm.buffer));
+}
+
+/**
+ * base64 PCM16 LE @24k -> Float32 [-1,1].
+ * @param {string} b64
+ * @returns {Float32Array}
+ */
+function pcm16Base64ToFloat(b64) {
+  const bytes = base64ToBytes(b64);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const n = Math.floor(bytes.byteLength / 2);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = view.getInt16(i * 2, true) / 0x8000;
+  }
+  return out;
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function bytesToBase64(bytes) {
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+/**
+ * @param {string} b64
+ * @returns {Uint8Array}
+ */
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Parse an ISO-8601-ish duration ("9.5s", "0.750s", "12s") to milliseconds.
+ * @param {string|undefined} d
+ * @returns {number} ms (defaults to 8000 if unparseable)
+ */
+function parseDurationMs(d) {
+  if (!d) return 8000;
+  const m = String(d).match(/([0-9]*\.?[0-9]+)\s*s/i);
+  if (m) return Math.round(parseFloat(m[1]) * 1000);
+  const n = parseFloat(d);
+  return Number.isFinite(n) ? Math.round(n * 1000) : 8000;
+}

@@ -1,0 +1,128 @@
+/* css/base.css — reset + root chrome layers (scaffold-owned). B&W only here; no color.
+   Positions every fixed layer per the z-index map from design-tokens.css. */
+
+/* ---- Reset ---- */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+/* ---- Background grid (z:0) ---- */
+/* Two 1px repeating-linear-gradients draw the line grid; a radial vignette
+   darkens the edges so the orb reads brighter in the center. */
+#grid-bg {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-grid);
+  pointer-events: none;
+  background-image:
+    radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.5) 100%),
+    repeating-linear-gradient(to right,  var(--grid-line) 0, var(--grid-line) 1px, transparent 1px, transparent var(--grid-size)),
+    repeating-linear-gradient(to bottom, var(--grid-line) 0, var(--grid-line) 1px, transparent 1px, transparent var(--grid-size));
+  background-position: center center;
+}
+
+/* ---- Orb canvas (z:10) — fullscreen, never eats pointer events ---- */
+#orb-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-orb);
+  pointer-events: none;
+  display: block;
+}
+
+/* ---- Widget layer (z:20) — layout engine's territory ---- */
+/* The layer itself is transparent to clicks; each widget re-enables pointer-events. */
+#widget-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-widgets);
+  pointer-events: none;
+}
+#widget-layer .widget { pointer-events: auto; }
+
+/* ---- HUD (z:30) ---- */
+#hud-top {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--hud-h);
+  z-index: var(--z-hud);
+}
+#dock {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: var(--dock-h);
+  z-index: var(--z-hud);
+}
+
+/* ---- Chat panel (z:35) ---- */
+#chat-panel {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: var(--chat-w);
+  z-index: var(--z-chat);
+}
+#chat-panel[hidden] { display: none; }
+
+/* ---- Toast layer (z:50) ---- */
+#toast-layer {
+  position: fixed;
+  bottom: var(--dock-h);
+  left: 0; right: 0;
+  z-index: var(--z-toast);
+  pointer-events: none;
+}
+
+/* ---- Intro layer (z:100) — covers everything until intro:done ---- */
+#intro-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-intro);
+  background: var(--bg);
+}
+#intro-layer[hidden] { display: none; }
+
+/* ---- Scrollbars — thin, monochrome ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-bright) transparent;
+}
+*::-webkit-scrollbar { width: 6px; height: 6px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--line-bright);
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--fg-faint); }
+
+/* ---- A11y helpers ---- */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+:focus-visible {
+  outline: 1px solid var(--fg-dim);
+  outline-offset: 2px;
+}
