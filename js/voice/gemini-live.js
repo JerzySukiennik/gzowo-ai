@@ -471,9 +471,27 @@ registerProcessor('gzowo-capture', CaptureProcessor);
 
 async function startAudioIn() {
   if (inCtx) return; // already running
-  micStream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
-  });
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+  } catch (err) {
+    // GŁOS→GŁOS must never fail silently. Tell the user exactly what to do.
+    console.error('[gemini-live] mic getUserMedia failed', err);
+    const name = err && err.name;
+    const denied = name === 'NotAllowedError' || name === 'SecurityError';
+    const busy = name === 'NotReadableError' || name === 'AbortError';
+    bus.emit('toast', {
+      text: denied
+        ? 'Nie mam mikrofonu — kliknij kłódkę w pasku adresu → Mikrofon → Zezwól, potem spróbuj znów.'
+        : busy
+          ? 'Mikrofon jest zajęty — zamknij inne karty z Gzowo / apki używające mikrofonu i spróbuj znów.'
+          : 'Mikrofon niedostępny — sprawdź czy jakiś jest podłączony i dozwolony.',
+      kind: 'warn'
+    });
+    setStatus('error', 'mic: ' + (name || 'unknown'));
+    throw err;
+  }
   inCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
   if (inCtx.state === 'suspended') { try { await inCtx.resume(); } catch (_e) { /* ignore */ } }
 
