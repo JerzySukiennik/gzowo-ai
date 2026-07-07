@@ -45,6 +45,13 @@ const WAKE_DEBOUNCE_MS = 2500;
 export async function init() {
   // Capability flag the HUD gates its WAKE toggle on. Off until a model is live.
   state.set('wakeAvailable', false);
+  // Load the ~53MB model in the BACKGROUND. NEVER await it here: main.js awaits
+  // init() during boot, and createModel() can take many seconds (or hang on a bad
+  // network), which would otherwise freeze the whole app behind a blank screen.
+  loadWake();
+}
+
+async function loadWake() {
   try {
     const vk = (CONFIG && CONFIG.vosk) || {};
     const modelUrl = vk.modelUrl || '/models/vosk-pl.tar.gz';
