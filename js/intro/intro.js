@@ -395,8 +395,14 @@ class Ceremony {
       this._revealField(this.userField, instant);
       this.userField.input.focus();
 
-      const email = await awaitSubmit(this.form, this.userField.input, this.signal);
-      const typedPrefix = (email.split('@')[0] || email).trim();
+      const rawUser = await awaitSubmit(this.form, this.userField.input, this.signal);
+      const typedPrefix = (rawUser.split('@')[0] || rawUser).trim();
+      // Map a bare username to an email so the login screen stays "just your name"
+      // (Jarvis-style) while Firebase still gets a valid email. A typed full email
+      // is used verbatim. Domain is configurable via CONFIG.auth.emailDomain.
+      const domain = (window.GZOWO_CONFIG && window.GZOWO_CONFIG.auth
+        && window.GZOWO_CONFIG.auth.emailDomain) || 'gzowo.ai';
+      const email = (rawUser.includes('@') ? rawUser : `${rawUser}@${domain}`).toLowerCase();
 
       // ---- (2) PASSWORD ----
       this.userField.input.setAttribute('readonly', ''); // lock the username

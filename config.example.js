@@ -17,6 +17,10 @@ export const CONFIG = {
     appId: 'PASTE_APP_ID'                             // App ID web
   },
 
+  // --- Login: wpisujesz samo imię, apka dokleja tę domenę (jurek -> jurek@gzowo.ai) ---
+  // Użytkownika w Firebase Auth utwórz z TAKIM samym mailem (np. jurek@gzowo.ai).
+  auth: { emailDomain: 'gzowo.ai' },
+
   // --- Gemini (mózg + głos, Live native audio) ---
   // Klucz z Google AI Studio (aistudio.google.com -> Get API key).
   gemini: {

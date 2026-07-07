@@ -16,6 +16,10 @@ export const CONFIG = {
     appId: '1:717017060506:web:775c59f063d43567b1fb23'
   },
 
+  // --- Login convenience: type just "jurek", app appends this domain -> jurek@gzowo.ai ---
+  // Your Firebase user must be created with the SAME email (e.g. jurek@gzowo.ai).
+  auth: { emailDomain: 'gzowo.ai' },
+
   // --- Gemini (brain + voice, Live native audio) ---
   gemini: {
     model: 'gemini-2.5-flash-preview-native-audio-dialog',

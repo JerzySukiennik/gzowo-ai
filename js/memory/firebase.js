@@ -523,6 +523,12 @@ function mapAuthError(code) {
       return 'Złe hasło albo nie ma takiego konta';
     case 'auth/network-request-failed':
       return 'Błąd sieci';
+    case 'auth/invalid-email':
+      return 'Zły format loginu';
+    case 'auth/user-disabled':
+      return 'Konto zablokowane';
+    case 'auth/operation-not-allowed':
+      return 'Włącz Email/Password w Firebase';
     default:
       return 'Coś nie pykło — spróbuj jeszcze raz';
   }
