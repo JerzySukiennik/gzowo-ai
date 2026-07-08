@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 import { buildIndex } from './projects-index.js';
 import { transcribe } from './whisper.js';
+import { brainConfigured, brainPassOk, brainIndex, brainReadFile, brainAppendDraft } from './brain.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Static root = parent v1/ dir, so `npm start` serves the entire app.
@@ -566,6 +567,38 @@ async function handleFetch(req, res, url) {
 }
 
 // ---------------------------------------------------------------------------
+// 7. "Jurek's 2nd Brain" — read the vault (.md) + append-only drafts. Every
+//    route: unconfigured -> 503, wrong/absent X-Brain-Pass -> 401. Read-only
+//    except /brain/draft (append to inbox/gzowoai-drafts.md).
+// ---------------------------------------------------------------------------
+function brainGate(req, res) {
+  if (!brainConfigured()) { sendJson(res, 503, { error: 'brain not configured' }); return false; }
+  if (!brainPassOk(req)) { sendJson(res, 401, { error: 'bad brain pass' }); return false; }
+  return true;
+}
+
+async function handleBrainIndex(req, res) {
+  if (!brainGate(req, res)) return;
+  sendJson(res, 200, await brainIndex());
+}
+
+async function handleBrainFile(req, res, url) {
+  if (!brainGate(req, res)) return;
+  const rel = url.searchParams.get('path') || '';
+  const content = await brainReadFile(rel);
+  if (content == null) { sendJson(res, 404, { error: 'not found or not a .md file' }); return; }
+  sendJson(res, 200, { path: rel, content });
+}
+
+async function handleBrainDraft(req, res) {
+  if (!brainGate(req, res)) return;
+  let payload;
+  try { payload = JSON.parse((await readBody(req, 512 * 1024)).toString('utf8') || '{}'); }
+  catch { sendJson(res, 400, { error: 'invalid JSON body' }); return; }
+  sendJson(res, 200, await brainAppendDraft(payload.topic, payload.text));
+}
+
+// ---------------------------------------------------------------------------
 // Request dispatcher.
 // ---------------------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
@@ -575,7 +608,8 @@ const server = http.createServer(async (req, res) => {
   const isApi =
     path === '/health' || path === '/token' || path === '/projects' || path === '/stt' ||
     path === '/ha/states' || path === '/ha/service' || path === '/ha/bambu' ||
-    path === '/ha/camera' || path === '/fetch';
+    path === '/ha/camera' || path === '/fetch' ||
+    path === '/brain/index' || path === '/brain/file' || path === '/brain/draft';
 
   // Log one line per request when finished.
   res.on('finish', () => {
@@ -589,7 +623,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS' && isApi) {
     if (originAllowed(req.headers.origin)) {
       res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'content-type');
+      res.setHeader('Access-Control-Allow-Headers', 'content-type, x-brain-pass');
       res.setHeader('Access-Control-Max-Age', '600');
     }
     res.writeHead(204);
@@ -607,6 +641,9 @@ const server = http.createServer(async (req, res) => {
     if (path === '/ha/bambu' && req.method === 'GET') return await handleHaBambu(req, res);
     if (path === '/ha/camera' && req.method === 'GET') return await handleHaCamera(req, res, url);
     if (path === '/fetch' && req.method === 'GET') return await handleFetch(req, res, url);
+    if (path === '/brain/index' && req.method === 'GET') return await handleBrainIndex(req, res);
+    if (path === '/brain/file' && req.method === 'GET') return await handleBrainFile(req, res, url);
+    if (path === '/brain/draft' && req.method === 'POST') return await handleBrainDraft(req, res);
 
     // Anything else = static file serving.
     if (req.method === 'GET') return serveStatic(req, res, path);
