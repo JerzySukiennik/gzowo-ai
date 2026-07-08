@@ -55,7 +55,7 @@ const [
   bridgeMod, soundMod, memoryMod, toastsMod, layoutMod, avatarMod,
   islandsMod, chatMod, trashMod, settingsMod, customAuthMod, startupMod,
   personaMod, geminiMod, wakeMod, modesMod, widgetToolsMod, homeMod,
-  bambuMod, skillsMod, marketplaceMod, webEmbedMod
+  bambuMod, skillsMod, marketplaceMod, webEmbedMod, brainToolsMod
 ] = await Promise.all([
   load('./bridge-client.js'),
   load('./audio/sound.js'),
@@ -78,7 +78,8 @@ const [
   load('./widgets/bambu.js'),
   load('./skills/skills.js'),
   load('./skills/marketplace.js'),
-  load('./widgets/web-embed.js')
+  load('./widgets/web-embed.js'),
+  load('./voice/brain-tools.js')
 ]);
 void personaMod; // referenced only for its side-effect-free data exports
 
@@ -117,6 +118,7 @@ await safeInit('bambu',         () => bambuMod?.init?.());
 await safeInit('skills',        () => skillsMod?.init?.());
 await safeInit('marketplace',   () => marketplaceMod?.init?.());
 await safeInit('web-embed',     () => webEmbedMod?.init?.());
+await safeInit('brain-tools',   () => brainToolsMod?.init?.());
 
 // ---- 5. Boot done ----------------------------------------------------------
 // custom-auth listens for this to release its deferred 'auth:ready'.
