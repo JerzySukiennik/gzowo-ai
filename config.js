@@ -43,8 +43,8 @@ export const CONFIG = {
   bridge: { url: 'http://localhost:8787' },
 
   // --- Cloudflare Worker (mints ephemeral tokens for the deployed site) ---
-  // Paste the URL from `wrangler deploy` to enable voice on GitHub Pages.
-  worker: { url: '' },
+  // Live (deployed 2026-07-09) — enables voice on GitHub Pages (no bridge).
+  worker: { url: 'https://gzowo-worker.gzowo.workers.dev' },
 
   // --- Weather (Open-Meteo, free, no key) — default Warszawa ---
   weather: { lat: 52.2297, lon: 21.0122, city: 'Warszawa' }

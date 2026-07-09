@@ -8,10 +8,9 @@ main = "worker.js"
 compatibility_date = "2026-01-01"
 
 [vars]
-# Dozwolone originy (CORS). '*' to placeholder wygodny na start (token i tak jest
-# jednorazowy i zablokowany server-side). Dla prywatnego deployu wpisz DOKŁADNY
-# origin swojej strony, np. "https://jerzysukiennik.github.io".
-ALLOWED_ORIGINS = "*"
+# Dozwolone originy (CORS). Zawężone do strony na Pages (token i tak jest
+# jednorazowy). Dodaj kolejne po przecinku, jeśli dojdzie własna domena.
+ALLOWED_ORIGINS = "https://jerzysukiennik.github.io"
 
 # ------------------------------------------------------------------------------
 # JAK ZDEPLOYOWAĆ (z katalogu worker/):

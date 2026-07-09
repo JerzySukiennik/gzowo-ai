@@ -64,13 +64,18 @@ function json(obj, status, extraHeaders) {
 
 /**
  * GET /token — mint an ephemeral Gemini token via REST.
- * liveConnectConstraints LOCK the session config server-side, mitigating token
- * abuse / tool-injection (SPEC §2). We keep the lock MINIMAL (model + session
- * resumption) so the browser can still set its own persona, tools AND response
- * modality on top. We deliberately do NOT lock responseModalities: the app ships
- * four modes (GŁOS/TEKST × GŁOS/TEKST) and the two text-output modes connect with
- * Modality.TEXT — locking the token to AUDIO here would silently break them over
- * the worker path (client TEXT vs token-locked AUDIO conflict).
+ *
+ * We mint an UNLOCKED token (uses:1 + short expiry only), mirroring the bridge's
+ * proven SDK call. Two reasons:
+ *   1. The v1alpha endpoint rejects a top-level `liveConnectConstraints` field
+ *      ("Unknown name liveConnectConstraints at 'auth_token'") — the server-side
+ *      config-lock shape the SPEC assumed is no longer accepted here.
+ *   2. Not pinning a model lets the client-side 3.1→2.5 fallback (gemini-live.js)
+ *      work over the Worker path too, not just the bridge.
+ * Security posture stays reasonable for a personal app: single-use, 2-min new-
+ * session window, 30-min hard expiry — same as the bridge. If Google restores a
+ * working constraints shape and we want the lock back, add it here AND keep it in
+ * sync with config.js gemini.model.
  */
 async function handleToken(request, env, cors) {
   if (!env.GEMINI_API_KEY) {
@@ -81,20 +86,7 @@ async function handleToken(request, env, cors) {
   const body = {
     uses: 1,
     expireTime: new Date(now + 30 * 60 * 1000).toISOString(),
-    newSessionExpireTime: new Date(now + 2 * 60 * 1000).toISOString(),
-    liveConnectConstraints: {
-      // MUST match config.js gemini.model (the PRIMARY the browser connects with).
-      // A token is locked to ONE model, so the deployed/Worker path is primary-only:
-      // the client-side 2.5 fallback in gemini-live.js works on the bridge/direct-key
-      // path (unlocked tokens) but NOT here. Historic gotcha: the old
-      // '...preview-native-audio-dialog' id does NOT exist and closes the socket with
-      // 1008. Keep this string in sync with config.js on every model bump.
-      model: 'models/gemini-3.1-flash-live-preview',
-      config: {
-        sessionResumption: {}
-      }
-    },
-    fieldMask: ''
+    newSessionExpireTime: new Date(now + 2 * 60 * 1000).toISOString()
   };
 
   let upstream;
