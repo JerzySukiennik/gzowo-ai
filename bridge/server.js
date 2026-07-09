@@ -160,7 +160,17 @@ function serveStatic(req, res, urlPath) {
   }
 
   const type = MIME[extname(filePath).toLowerCase()] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
+  // HEAD: reply with headers only (no body). wake-word.js probes the Vosk model
+  // with a HEAD request to test reachability, so this must return 200 — piping a
+  // body on HEAD is illegal, and skipping HEAD entirely 404s the reachability check.
+  const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache' };
+  try { headers['Content-Length'] = String(statSync(filePath).size); } catch { /* ignore */ }
+  if (req.method === 'HEAD') {
+    res.writeHead(200, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, headers);
   createReadStream(filePath).pipe(res);
 }
 
@@ -645,8 +655,8 @@ const server = http.createServer(async (req, res) => {
     if (path === '/brain/file' && req.method === 'GET') return await handleBrainFile(req, res, url);
     if (path === '/brain/draft' && req.method === 'POST') return await handleBrainDraft(req, res);
 
-    // Anything else = static file serving.
-    if (req.method === 'GET') return serveStatic(req, res, path);
+    // Anything else = static file serving (GET + HEAD; HEAD is headers-only).
+    if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, path);
 
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 Not Found');

@@ -48,7 +48,7 @@
   --islands-clearance: 112px;   /* bottom safe-area reserve for widgets (= islands-h + 2*islands-bottom) */
   --widget-gap: 16px;
   --widget-radius: 2px;
-  --avatar-idle-ratio: 0.30;    /* avatar diameter / min(vw,vh) in idle+talking (replaces --orb-idle-ratio) */
+  --avatar-idle-ratio: 0.27;    /* avatar diameter / min(vw,vh) in idle+talking (Jurek 2026-07-08: -40% vs pre-fix render) */
   --avatar-corner-ratio: 0.12;  /* avatar diameter / min(vw,vh) in showing, top-left (replaces --orb-corner-ratio) */
   --bubble-max-w: 380px;        /* chat bubble beside the avatar */
   --bubble-offset: 24px;        /* gap between avatar edge and bubble */

@@ -31,6 +31,12 @@ let el = {};             // { card, user, userText, body, gzowo, caret, form, in
 // Latest avatar slot {cx,cy,r} in px, or null until the layout emits one.
 let slot = null;
 
+// Manual placement (drag): once Jurek drags the bubble, {x,y} wins over the
+// avatar anchor for the rest of the session (still clamped to the viewport).
+let manual = null;
+let lastPos = { x: 0, y: 0 };   // last committed translate (drag base)
+let dragState = null;           // {startX, startY, baseX, baseY, moved}
+
 // Visibility + hide-transition bookkeeping.
 let visible = false;
 let hideTimer = 0;
@@ -91,6 +97,13 @@ function build() {
 
   const card = cel('div', 'chat-card glass');
 
+  // (0) drag grip — slim affordance strip; the whole card drags too (except the
+  // input row, buttons and the selectable transcript).
+  const grip = cel('div', 'chat-grip');
+  grip.title = 'Przeciągnij';
+  grip.setAttribute('aria-hidden', 'true');
+  card.appendChild(grip);
+
   // (a) optional last-user line — one line, dim, 'TY >' prefix, ellipsis.
   const user = cel('div', 'chat-user');
   user.hidden = true;
@@ -126,7 +139,61 @@ function build() {
 
   el = { card, user, userText, body, gzowo, caret, form, input };
   form.addEventListener('submit', onSubmit);
+
+  // --- Drag (pointer events; manual position wins from the first real move) ---
+  card.addEventListener('pointerdown', onDragStart);
+  card.addEventListener('pointermove', onDragMove);
+  card.addEventListener('pointerup', onDragEnd);
+  card.addEventListener('pointercancel', onDragEnd);
+
+  // --- Resize: native CSS resize handle changes the card box; re-clamp the
+  // bubble so the grown card never sticks off-screen. (liquid-glass has its own
+  // ResizeObserver and refreshes the refraction map itself.) ---
+  try {
+    const ro = new ResizeObserver(() => {
+      // Inline width/height = the native handle was used → lift the size caps.
+      if (card.style.width || card.style.height) card.classList.add('is-resized');
+      if (visible) position();
+    });
+    ro.observe(card);
+  } catch (_e) { /* very old engines: resize still works, minus the re-clamp */ }
   return true;
+}
+
+// -----------------------------------------------------------------------------
+// Dragging — from the grip or any non-interactive part of the card.
+// -----------------------------------------------------------------------------
+function dragExcluded(target) {
+  return !!(target && target.closest &&
+    target.closest('input, button, .chat-body'));
+}
+
+function onDragStart(e) {
+  if (!e.isPrimary || dragExcluded(e.target)) return;
+  // Native resize corner (bottom-right ~18px) must keep working — don't hijack it.
+  const r = el.card.getBoundingClientRect();
+  if (e.clientX > r.right - 20 && e.clientY > r.bottom - 20) return;
+  dragState = { startX: e.clientX, startY: e.clientY, baseX: lastPos.x, baseY: lastPos.y, moved: false };
+  try { el.card.setPointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+}
+
+function onDragMove(e) {
+  if (!dragState) return;
+  const dx = e.clientX - dragState.startX;
+  const dy = e.clientY - dragState.startY;
+  if (!dragState.moved && Math.abs(dx) + Math.abs(dy) < 4) return; // click, not drag
+  if (!dragState.moved) root.classList.add('is-dragging');         // 1:1, no glide
+  dragState.moved = true;
+  manual = { x: dragState.baseX + dx, y: dragState.baseY + dy };
+  position();
+  e.preventDefault();
+}
+
+function onDragEnd(e) {
+  if (!dragState) return;
+  try { el.card.releasePointerCapture(e.pointerId); } catch (_e) { /* ignore */ }
+  dragState = null;
+  root.classList.remove('is-dragging');
 }
 
 // -----------------------------------------------------------------------------
@@ -250,7 +317,12 @@ function position() {
   let y;
   let side;
 
-  if (slot) {
+  if (manual) {
+    // Dragged by Jurek: his spot wins for the session; only the clamp applies.
+    side = root.dataset.side || 'right';
+    x = manual.x;
+    y = manual.y;
+  } else if (slot) {
     const rightX = slot.cx + slot.r * R_FACTOR + T.offset;
     const roomRight = vw - T.space5 - rightX - w;
     if (roomRight >= 0 && (vw - T.space5 - rightX) >= RIGHT_MIN) {
@@ -275,6 +347,7 @@ function position() {
   x = Math.max(T.space5, Math.min(x, vw - T.space5 - w));
   y = Math.max(T.space5, Math.min(y, vh - T.clearance - h));
 
+  lastPos = { x, y };   // drag base for the next pointerdown
   root.dataset.side = side;
   root.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
 }

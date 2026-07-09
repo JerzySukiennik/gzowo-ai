@@ -34,8 +34,8 @@ const CSS = `
   pointer-events: none;
   max-width: min(420px, 92vw);
   padding: var(--space-3) var(--space-4);
-  background: var(--bg-raised);
-  border: 1px solid var(--line-strong);
+  /* Surface comes from the shared .glass recipe (liquid glass via glass.js);
+     only the radius is overridden to the small variant. */
   border-radius: var(--glass-radius-sm);
   color: var(--fg);
   font-family: var(--font-mono);
@@ -46,7 +46,6 @@ const CSS = `
   display: flex;
   flex-direction: column;
   align-items: center;
-  box-shadow: var(--glass-shadow);
   opacity: 0;
   transform: translateY(12px);
   transition:
@@ -89,7 +88,7 @@ function showToast({ text, kind = 'info' } = {}) {
   }
 
   const card = document.createElement('div');
-  card.className = kind === 'warn' ? 'gz-toast gz-warn' : 'gz-toast';
+  card.className = kind === 'warn' ? 'gz-toast gz-warn glass' : 'gz-toast glass';
   card.setAttribute('role', 'status');
   card.textContent = (kind === 'warn' ? '! ' : '') + text;
   layer.appendChild(card);

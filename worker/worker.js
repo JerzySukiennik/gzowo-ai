@@ -83,7 +83,13 @@ async function handleToken(request, env, cors) {
     expireTime: new Date(now + 30 * 60 * 1000).toISOString(),
     newSessionExpireTime: new Date(now + 2 * 60 * 1000).toISOString(),
     liveConnectConstraints: {
-      model: 'models/gemini-2.5-flash-preview-native-audio-dialog',
+      // MUST match config.js gemini.model (the PRIMARY the browser connects with).
+      // A token is locked to ONE model, so the deployed/Worker path is primary-only:
+      // the client-side 2.5 fallback in gemini-live.js works on the bridge/direct-key
+      // path (unlocked tokens) but NOT here. Historic gotcha: the old
+      // '...preview-native-audio-dialog' id does NOT exist and closes the socket with
+      // 1008. Keep this string in sync with config.js on every model bump.
+      model: 'models/gemini-3.1-flash-live-preview',
       config: {
         sessionResumption: {}
       }

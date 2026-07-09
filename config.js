@@ -20,8 +20,12 @@ export const CONFIG = {
   },
 
   // --- Gemini (brain + voice, Live native audio) ---
+  // model = primary, modelFallback = tried once if the primary never opens (e.g. a
+  // preview model gets pulled). gemini-live.js does the client-side downgrade; keep
+  // the Worker's liveConnectConstraints.model in sync with `model`.
   gemini: {
-    model: 'gemini-2.5-flash-native-audio-latest',
+    model: 'gemini-3.1-flash-live-preview',        // primary (newer native-audio, free tier)
+    modelFallback: 'gemini-2.5-flash-native-audio-latest', // fallback if primary won't open
     voiceName: 'Schedar',                 // timbre chosen by Jurek
     apiKeyDirect: ''                      // ⚠️ ALWAYS empty — key is in bridge/.env + Worker, NEVER here
   },

@@ -24,6 +24,14 @@ import { PERSONA } from './persona.js';
 
 const CONFIG = window.GZOWO_CONFIG;
 
+// ---- Model chain ------------------------------------------------------------
+// Primary is tried first; if it NEVER opens (bad/pulled model -> WS close 1008
+// before onopen), we downgrade ONCE to the fallback. This only fires on the bridge
+// / direct-key path (their tokens aren't model-locked); a Worker token is locked to
+// the primary, so there the fallback attempt just fails honestly to the drop toast.
+const PRIMARY_MODEL = (CONFIG.gemini && CONFIG.gemini.model) || 'gemini-2.5-flash-native-audio-latest';
+const FALLBACK_MODEL = (CONFIG.gemini && CONFIG.gemini.modelFallback) || '';
+
 // ---- Module singletons ------------------------------------------------------
 let ai = null;                 // GoogleGenAI instance
 let aiIsDirectKey = false;     // true only when `ai` was built from a durable direct
@@ -36,6 +44,10 @@ let resumptionHandle = null;   // last session resumption handle (RAM only)
 let retriedOnce = false;       // one auto-retry budget per unexpected drop
 let goAwayTimer = null;        // scheduled transparent reconnect timer
 let pendingGreet = null;       // one-shot username to greet on the next open
+let sessionOpened = false;     // did the CURRENT connect reach onopen? (fallback gate)
+let modelFellBack = false;     // already downgraded primary->fallback this attempt?
+let activeModel = null;        // last model that successfully opened (sticky per page load)
+let lastModel = null;          // model used by the in-flight / most recent connect
 
 // ---- Token prefetch cache ---------------------------------------------------
 // Bridge/worker mint SINGLE-USE ephemeral tokens with a ~2-minute new-session
@@ -204,6 +216,15 @@ async function connect(opts = {}) {
   // One-shot greeting for THIS open only (consumed in handleOpen). Reconnects and
   // reopens pass no greet, so the greeting never repeats.
   pendingGreet = opts.greet || null;
+  // Model for this attempt: explicit fallback override > last-good model > primary.
+  // A normal (non-fallback) connect resets the downgrade budget so a fresh session
+  // always retries the primary first.
+  const model = opts.model || activeModel || PRIMARY_MODEL;
+  lastModel = model;
+  sessionOpened = false;
+  // Only a fresh, user-initiated connect (not a fallback/reconnect, marked
+  // opts.internal) refills the one-shot downgrade budget.
+  if (!opts.internal) modelFellBack = false;
   // New epoch: any callback from a previously-torn-down session is now stale
   // and will be ignored, which kills the deliberate-close vs auto-retry race.
   const epoch = ++sessionEpoch;
@@ -250,7 +271,7 @@ async function connect(opts = {}) {
 
   try {
     session = await ai.live.connect({
-      model: CONFIG.gemini.model,
+      model,
       config,
       callbacks: {
         onopen: () => { if (epoch === sessionEpoch) handleOpen(); },
@@ -263,6 +284,8 @@ async function connect(opts = {}) {
     console.error('[gemini-live] connect failed', err);
     connecting = false;
     session = null;
+    // A synchronous connect throw on the primary -> try the fallback model once.
+    if (tryModelFallback('connect-throw')) return;
     setStatus('error', String(err && err.message ? err.message : err));
     bus.emit('toast', { text: 'Nie udało się połączyć z modelem — sprawdź klucz i sieć.', kind: 'warn' });
     return;
@@ -271,12 +294,35 @@ async function connect(opts = {}) {
   connecting = false;
 }
 
+/**
+ * If the primary model NEVER opened and we haven't downgraded yet, reconnect once
+ * on the fallback model. Returns true if a fallback connect was kicked off (caller
+ * should stop its own error handling), false otherwise.
+ * @param {string} reason  for logging only
+ * @returns {boolean}
+ */
+function tryModelFallback(reason) {
+  if (sessionOpened) return false;                          // it worked — not a model problem
+  if (modelFellBack) return false;                          // already downgraded once
+  if (!FALLBACK_MODEL || lastModel === FALLBACK_MODEL) return false;
+  modelFellBack = true;
+  setStatus('connecting', 'model-fallback');
+  console.warn('[gemini-live] primary model failed (' + reason + ') — falling back to ' + FALLBACK_MODEL);
+  bus.emit('toast', { text: 'Model ' + PRIMARY_MODEL + ' nie wstał — przełączam na zapasowy.', kind: 'warn' });
+  connect({ model: FALLBACK_MODEL, internal: true }).catch((e) => console.error('[gemini-live] fallback connect', e));
+  return true;
+}
+
 // ============================================================================
 //  SESSION CALLBACKS
 // ============================================================================
 
 function handleOpen() {
   retriedOnce = false;
+  // This model works — remember it so reconnects/resumptions reuse it and the
+  // fallback gate (sessionOpened) never fires for a mid-session drop.
+  sessionOpened = true;
+  activeModel = lastModel;
   setStatus('open');
 
   // Start audio pipelines per current mode.
@@ -429,11 +475,15 @@ function handleError(err) {
 function handleClose(ev) {
   teardownSession();
 
+  // Model fallback FIRST: if we never opened (e.g. primary model closed us with
+  // 1008 before onopen) and haven't downgraded yet, retry once on the fallback.
+  if (tryModelFallback('close-before-open')) return;
+
   // Unexpected drop: one transparent retry using the resumption handle.
   if (!retriedOnce) {
     retriedOnce = true;
     setStatus('connecting', 'reconnect');
-    connect({ handle: resumptionHandle || undefined }).catch((e) =>
+    connect({ handle: resumptionHandle || undefined, internal: true }).catch((e) =>
       console.error('[gemini-live] reconnect failed', e)
     );
     return;
@@ -473,7 +523,7 @@ function scheduleReconnect(timeLeft) {
     const handle = resumptionHandle || undefined;
     // Close the doomed session ourselves, then reopen resumed — transparent to UI.
     closeSessionDeliberately();
-    await connect({ handle });
+    await connect({ handle, internal: true });
   }, delay);
 }
 
@@ -559,7 +609,7 @@ function onModeChange(mode) {
   if (needAudioOut !== haveAudioOut) {
     const handle = resumptionHandle || undefined;
     closeSessionDeliberately();
-    connect({ handle }).catch((e) => console.error('[gemini-live] mode reopen', e));
+    connect({ handle, internal: true }).catch((e) => console.error('[gemini-live] mode reopen', e));
     return;
   }
   // Input modality can toggle live: start/stop the mic without reconnecting.

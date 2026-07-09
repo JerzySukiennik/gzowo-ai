@@ -183,6 +183,93 @@
   border-color: var(--fg);
 }
 
+/* ---- CONNECTORY: "Jurek's 2nd Brain" row ------------------------------- */
+.connector-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.connector-id {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.connector-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.connector-desc {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking);
+  color: var(--fg-faint);
+}
+.connector-pill {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--glass-radius-sm);
+  padding: var(--space-1) var(--space-3);
+  white-space: nowrap;
+}
+.connector-pill[data-status="connected"] {
+  color: var(--bg);
+  background: var(--fg);
+  border-color: var(--fg);
+}
+.connector-pill[data-status="offline"],
+.connector-pill[data-status="locked"] { color: var(--fg-faint); }
+
+.connector-activate {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.connector-activate[hidden] { display: none; }
+.connector-pass {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--glass-radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-wide);
+  padding: var(--space-2) var(--space-3);
+}
+.connector-pass:focus {
+  outline: none;
+  border-color: var(--line-bright);
+}
+.connector-btn {
+  flex: 0 0 auto;
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--glass-radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  padding: var(--space-2) var(--space-4);
+}
+.connector-btn:hover {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+
 /* ---- Reduced motion: drop the scale, keep a quick fade ------------------ */
 @media (prefers-reduced-motion: reduce) {
   .settings-backdrop,

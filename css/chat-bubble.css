@@ -18,6 +18,8 @@
     opacity var(--t-med) var(--ease-out);
 }
 #chat-bubble.is-shown { opacity: 1; }
+/* While Jurek drags: the transform must track the pointer 1:1 — no glide. */
+#chat-bubble.is-dragging { transition: opacity var(--t-med) var(--ease-out); }
 
 /* ---- Tail: a small rotated glass square on the avatar-facing side. Lives on the
         anchor (::before) because the .glass card clips its own overflow. -------- */
@@ -63,9 +65,43 @@
   transform: scale(0.96);
   transform-origin: left center;
   transition: transform var(--t-med) var(--ease-out);
+  /* Native resize handle (bottom-right). Requires overflow other than visible —
+     .glass already sets overflow:hidden. */
+  resize: both;
+  min-height: 64px;
 }
 #chat-bubble.is-shown .chat-card { transform: scale(1); }
 #chat-bubble[data-side='below'] .chat-card { transform-origin: top center; }
+
+/* Once Jurek resized it (inline width/height present → JS adds .is-resized):
+   lift the default caps and let the transcript fill the new box. */
+.chat-card.is-resized {
+  max-width: min(92vw, 720px);
+  max-height: 70vh;
+}
+.chat-card.is-resized .chat-body {
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---- Drag grip — slim bar at the top of the card ------------------------- */
+.chat-grip {
+  display: flex;
+  justify-content: center;
+  padding: 1px 0 3px;
+  margin: -6px 0 -6px;
+  cursor: grab;
+  touch-action: none;             /* pointer events own the gesture on touch */
+}
+.chat-grip::before {
+  content: '';
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-bright);
+}
+#chat-bubble.is-dragging .chat-grip { cursor: grabbing; }
 
 /* ---- (a) last-user line — one line, dim, prefixed, truncated with ellipsis --- */
 .chat-user {

@@ -24,7 +24,8 @@ export const CONFIG = {
   // Klucz z Google AI Studio (aistudio.google.com -> Get API key) trzymasz w
   // bridge/.env oraz w sekrecie Workera. Tutaj apiKeyDirect ZOSTAW puste.
   gemini: {
-    model: 'gemini-2.5-flash-native-audio-latest',    // model speech-to-speech
+    model: 'gemini-3.1-flash-live-preview',           // primary (native-audio, free tier)
+    modelFallback: 'gemini-2.5-flash-native-audio-latest', // fallback, gdy primary nie wstanie
     voiceName: 'Schedar',                             // timbre wybrany przez Jurka
     apiKeyDirect: ''                                  // ⚠️ ZAWSZE puste — klucz mintuje most/Worker
   },

@@ -52,7 +52,7 @@ async function load(path) {
 
 // Load every module up front (parallel). Nulls are tolerated everywhere below.
 const [
-  bridgeMod, soundMod, memoryMod, toastsMod, layoutMod, avatarMod,
+  bridgeMod, soundMod, memoryMod, glassMod, toastsMod, layoutMod, avatarMod,
   islandsMod, chatMod, trashMod, settingsMod, customAuthMod, startupMod,
   personaMod, geminiMod, wakeMod, modesMod, widgetToolsMod, homeMod,
   bambuMod, skillsMod, marketplaceMod, webEmbedMod, brainToolsMod
@@ -60,6 +60,7 @@ const [
   load('./bridge-client.js'),
   load('./audio/sound.js'),
   load('./memory/firebase.js'),
+  load('./ui/glass.js'),
   load('./ui/toasts.js'),
   load('./core/layout-engine.js'),
   load('./avatar/avatar.js'),
@@ -100,6 +101,7 @@ async function safeInit(name, fn) {
 await safeInit('bridge-client', () => bridgeMod?.bridgeClient?.init?.());
 await safeInit('sound',         () => soundMod?.init?.());
 await safeInit('memory',        () => memoryMod?.init?.());
+await safeInit('glass',         () => glassMod?.init?.());   // before UI builders — the observer then catches everything
 await safeInit('toasts',        () => toastsMod?.init?.());
 await safeInit('layout',        () => layoutMod?.layout?.init?.());
 await safeInit('avatar',        () => avatarMod?.init?.());

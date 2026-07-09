@@ -43,6 +43,13 @@ html, body {
 #avatar-canvas {
   position: fixed;
   inset: 0;
+  /* Explicit CSS size is REQUIRED: a canvas is a replaced element, so inset:0
+     alone does NOT stretch it — it renders at its intrinsic (backing-store) size,
+     i.e. dpr× the viewport → avatar drawn 1.5× too big and off toward
+     bottom-right. 100%/100% pins the CSS box to the viewport; the dpr-scaled
+     backing store then maps 1:1 onto it. */
+  width: 100%;
+  height: 100%;
   z-index: var(--z-avatar);
   pointer-events: none;
   display: block;

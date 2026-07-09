@@ -35,7 +35,7 @@ const SLOT_STIFFNESS = 0.12;     // spring-lerp factor per frame toward the slot
 const MOUSE_LERP = 0.12;         // pointer follow easing per frame
 const REPEL_STRENGTH = 0.15;     // pointer repulsion magnitude (radius units)
 const REPEL_FALLOFF = 1.6;       // pointer repulsion exp() falloff
-const BREATH_AMP = 0.03;         // idle breath radius modulation (~+/-3%)
+const BREATH_AMP = 0.045;        // idle breath radius modulation (~+/-4.5%, visibly alive)
 const BREATH_SPEED = 0.8;        // idle breath angular speed
 const REVEAL_MS = 1200;          // startup reveal duration (--t-cine)
 const IDLE_FPS = 30;             // frame-skip target when fully settled
@@ -46,11 +46,26 @@ const RESIZE_DEBOUNCE = 120;     // ms
 
 const N_FULL = 140;              // loop points at full size
 const N_LOD = 90;                // loop points when small (r < LOD_RADIUS)
-const FIL_FULL = 3;              // interior filaments at full size
-const FIL_LOD = 2;               // interior filaments when small
 const LOD_RADIUS = 120;          // px radius below which LOD kicks in
 const RIBBON_SAMPLES = 120;      // samples per analytic talking ribbon
 const TWO_PI = Math.PI * 2;
+
+// ---- Interior light arcs (the reference-look "crossing streaks") ------------
+// Each arc is a segment of a great circle of the sphere seen in orthographic
+// projection: an ellipse (semi-axes R, R*k) tilted by psi, both drifting VERY
+// slowly — the sphere reads as 3D light and the idle state is never frozen.
+// Arrays are module constants -> zero allocations in the frame loop.
+// Each streak is a FULL ellipse (a whole great circle): it touches the rim at the
+// ends of its major axis and stays inside elsewhere — exactly the reference look,
+// with no arc endpoints floating loose inside the sphere.
+const ARC_COUNT = 4;
+const ARC_K = [0.34, 0.52, 0.24, 0.66]; // ellipse flattening (cos of view angle)
+const ARC_PSI = [0.20, 2.85, 0.85, 5.75]; // base tilts ≈ +11°/−17°/+49°/−31° — horizontal flow like the reference
+const ARC_ROT = [0.060, -0.045, 0.085, -0.070]; // tilt drift (rad/s) — slow, hypnotic
+const ARC_SPIN = [0.22, -0.16, 0.19, -0.26]; // wobble-pattern drift along the ellipse (rad/s)
+const ARC_SAMPLES_FULL = 56;
+const ARC_SAMPLES_LOD = 32;
+const ARC_LOD_COUNT = 3;               // arcs drawn when small
 
 // ---- Tiny value-noise + fbm (no libs; mirrors the v1 in-shader hash) --------
 function fract(x) { return x - Math.floor(x); }
@@ -143,6 +158,45 @@ export async function init() {
     gctx.fillRect(0, 0, 160, 160);
   }
 
+  // ---- Pre-rendered orb BODY sprite (the reference look) ---------------------
+  // A volumetric white sphere: faint interior haze that brightens toward the rim,
+  // plus a soft, wide rim glow built from concentric strokes of decreasing width
+  // and rising alpha (a cheap gaussian). Rendered ONCE at 512px, scaled per frame —
+  // zero per-frame filter/shadowBlur. BODY_R is the sphere radius inside the
+  // sprite; BODY_SCALE converts the live avatar radius -> sprite draw half-size.
+  const BODY_SIZE = 512, BODY_R = 200;
+  const BODY_SCALE = (BODY_SIZE / 2) / BODY_R;   // 1.28 — sprite includes rim halo
+  const body = document.createElement('canvas');
+  body.width = BODY_SIZE; body.height = BODY_SIZE;
+  {
+    const bctx = body.getContext('2d');
+    const c = BODY_SIZE / 2;
+    // FILLED white/gray body (Jurek: the orb is the white ACCENT of the black UI,
+    // not a wireframe): milky interior, brighter shell at the rim, soft aura past
+    // it. Gradient radius = 1.22×R, so the rim sits at stop ≈0.82.
+    const g = bctx.createRadialGradient(c, c, 0, c, c, BODY_R * 1.22);
+    g.addColorStop(0.00, 'rgba(255,255,255,0.38)');
+    g.addColorStop(0.60, 'rgba(255,255,255,0.48)');
+    g.addColorStop(0.82, 'rgba(255,255,255,0.66)');
+    g.addColorStop(0.90, 'rgba(255,255,255,0.16)');
+    g.addColorStop(1.00, 'rgba(255,255,255,0)');
+    bctx.fillStyle = g;
+    bctx.fillRect(0, 0, BODY_SIZE, BODY_SIZE);
+    // Soft rim: concentric strokes emulate a blurred bright edge.
+    bctx.strokeStyle = '#fff';
+    const rim = [
+      [26, 0.030], [16, 0.060], [9, 0.110], [5, 0.220], [2.6, 0.420], [1.3, 0.800]
+    ];
+    for (const [w, a] of rim) {
+      bctx.globalAlpha = a;
+      bctx.lineWidth = w;
+      bctx.beginPath();
+      bctx.arc(c, c, BODY_R, 0, TWO_PI);
+      bctx.stroke();
+    }
+    bctx.globalAlpha = 1;
+  }
+
   // ---- Backing store + DPR --------------------------------------------------
   // The canvas CSS box is pinned fixed inset:0 by base.css; we only own the backing
   // store. We scale the context by dpr so ALL drawing math stays in CSS px.
@@ -163,7 +217,15 @@ export async function init() {
   // ---- Slot: current + target center/radius (CSS px). Default = centered home
   // so the avatar has a sane place before the layout engine's first 'avatar:slot'. --
   function defaultSlot() {
-    const r = Math.min(window.innerWidth, window.innerHeight) * 0.15; // ~0.30 diameter
+    // Diameter ratio comes from the same token the layout engine reads, so the
+    // pre-layout default never disagrees with the first real 'avatar:slot'.
+    let ratio = 0.27;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--avatar-idle-ratio');
+      const n = parseFloat(raw);
+      if (Number.isFinite(n) && n > 0) ratio = n;
+    } catch (_e) { /* keep fallback */ }
+    const r = Math.min(window.innerWidth, window.innerHeight) * (ratio / 2);
     return { cx: window.innerWidth / 2, cy: window.innerHeight / 2, r };
   }
   const target = defaultSlot();
@@ -204,6 +266,7 @@ export async function init() {
   let ft = 0;                       // elapsed seconds
   let fmx = -1e6, fmy = -1e6;       // mouse (px)
   let fmlx = 0, fmly = 0;           // mouse in radius units
+  let fpx = 0, fpy = 0;             // sprite parallax offset (px) — body dodges the cursor
   let morphE = 0;                   // eased morph (smoothstep) for the position melt
 
   // Repel scratch — module-shared out-params so repel() allocates nothing.
@@ -239,26 +302,45 @@ export async function init() {
     ctx.stroke();
   }
 
-  // Faint drifting interior filaments (idle light-painting strokes). Each tapers to
-  // the center line at its ends so it always lives inside the silhouette.
-  function drawFilaments(count, alpha) {
+  // Interior light arcs — segments of slowly-drifting great-circle ellipses (the
+  // reference look: smooth crossing streaks of light on a 3D sphere). Each arc is
+  // stroked 3× (wide/faint -> thin/bright) to fake a soft glow with zero blur.
+  // All parameters come from module-const arrays; the loop allocates nothing.
+  function drawArcOnce(idx, samples, rr) {
+    const psi = ARC_PSI[idx] + ft * ARC_ROT[idx];
+    const k = ARC_K[idx];
+    const t0 = ft * ARC_SPIN[idx];
+    const cosP = Math.cos(psi), sinP = Math.sin(psi);
+    ctx.beginPath();
+    for (let s = 0; s <= samples; s++) {
+      const t = t0 + TWO_PI * (s / samples);
+      // Tiny radial wobble keeps the streak hand-drawn, never CAD-perfect.
+      const w = 1 + (fbm1(t * 0.9 + idx * 7.3 + ft * 0.10) - 0.5) * 0.04;
+      const ex = Math.cos(t) * rr * w;
+      const ey = Math.sin(t) * k * rr * w;
+      // Same cursor repulsion as the rim — hover bends the streaks too.
+      repel(fcx + ex * cosP - ey * sinP, fcy + ex * sinP + ey * cosP);
+      if (s === 0) ctx.moveTo(_rx, _ry); else ctx.lineTo(_rx, _ry);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  function drawArcs(count, samples, alpha) {
     if (alpha <= 0.003) return;
-    ctx.globalAlpha = alpha;
-    ctx.lineWidth = 1;
-    const span = frEff * 0.72;
-    const K = 22;
-    for (let fi = 0; fi < count; fi++) {
-      const baseY = (fi - (count - 1) / 2) * frEff * 0.2;
-      ctx.beginPath();
-      for (let k = 0; k < K; k++) {
-        const fx = -span + (2 * span) * (k / (K - 1));
-        const taper = 1 - (fx / span) * (fx / span);          // 1 center -> 0 ends
-        const n = fbm(fx * 0.006 + fi * 5.3, ft * 0.15 + fi * 2.7) * 2 - 1;
-        const x = fcx + fx;
-        const y = fcy + (baseY + n * frEff * 0.3) * taper;
-        if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
+    const rr = frEff * 0.985;                       // major axis = rim (touch points)
+    const sc = Math.max(0.35, frEff / 200);         // glow width scales with size
+    for (let i = 0; i < count; i++) {
+      // Three passes wide->thin emulate a soft glow around each streak.
+      ctx.globalAlpha = alpha * 0.10;
+      ctx.lineWidth = 8 * sc;
+      drawArcOnce(i, samples, rr);
+      ctx.globalAlpha = alpha * 0.30;
+      ctx.lineWidth = 3.4 * sc;
+      drawArcOnce(i, samples, rr);
+      ctx.globalAlpha = alpha * 0.80;
+      ctx.lineWidth = Math.max(1, 1.5 * sc);
+      drawArcOnce(i, samples, rr);
     }
   }
 
@@ -410,37 +492,60 @@ export async function init() {
     finvW = (0.55 - ampC * 0.3) * finvR;            // envelope widens as amp rises
     famp01 = 0.25 + ampC;                           // baseline motion even when quiet
     fmx = mouseX; fmy = mouseY;
-    if (fmx > -1e5) { fmlx = (fmx - fcx) * finvR; fmly = (fmy - fcy) * finvR; }
+    fpx = 0; fpy = 0;
+    if (fmx > -1e5) {
+      fmlx = (fmx - fcx) * finvR; fmly = (fmy - fcy) * finvR;
+      // Interior parallax: the filled body dodges the cursor with the same
+      // exp falloff as the point repulsion, so the WHOLE orb reacts to hover.
+      const md = Math.sqrt(fmlx * fmlx + fmly * fmly);
+      if (md > 1e-4) {
+        const f = Math.exp(-md * REPEL_FALLOFF) * REPEL_STRENGTH * 0.6;
+        fpx = (-fmlx / md) * f * frEff;
+        fpy = (-fmly / md) * f * frEff;
+      }
+    }
 
     // LOD off the settled radius (stable — doesn't flicker during reveal/breath).
     const small = cur.r < LOD_RADIUS;
     const N = small ? N_LOD : N_FULL;
-    const FIL = small ? FIL_LOD : FIL_FULL;
+    const ARCS = small ? ARC_LOD_COUNT : ARC_COUNT;
+    const ARC_S = small ? ARC_SAMPLES_LOD : ARC_SAMPLES_FULL;
 
     // --- 1. Center glow sprite (pre-rendered, composited additively) ---
-    const gR = frEff * 1.8;
+    // Both sprites take the parallax offset so the filled interior reacts to hover.
+    const gR = frEff * 1.6;
     ctx.globalCompositeOperation = 'lighter';
-    ctx.globalAlpha = reveal * (0.8 - 0.2 * morphE);   // ~60% during talking
-    ctx.drawImage(glow, fcx - gR, fcy - gR, gR * 2, gR * 2);
+    ctx.globalAlpha = reveal * (0.55 - 0.15 * morphE);
+    ctx.drawImage(glow, fcx + fpx - gR, fcy + fpy - gR, gR * 2, gR * 2);
+
+    // --- 2. Volumetric orb body (pre-rendered haze + soft rim; melts away while
+    // talking so only the wave remains) ---
+    const bR = frEff * BODY_SCALE;
+    ctx.globalAlpha = reveal * (1 - morphE);
+    ctx.drawImage(body, fcx + fpx - bR, fcy + fpy - bR, bR * 2, bR * 2);
     ctx.globalCompositeOperation = 'source-over';
 
-    // --- 2. Interior filaments (idle body detail; fade out under the wave) ---
-    drawFilaments(FIL, reveal * 0.15 * (1 - morphE * 0.75));
+    // --- 3. Interior light arcs (reference streaks; fade out under the wave).
+    // Brighter than before: they must read on the now-filled milky body. ---
+    ctx.lineCap = 'round';
+    drawArcs(ARCS, ARC_S, reveal * 0.75 * (1 - morphE));
 
-    // --- 3. The main loop: N points that melt from the circle onto ribbon 0 ---
-    // At morphE=0 they trace the irregular breathing circle; at morphE=1 a triangle
-    // sweep maps them across the FULL width onto the primary sine ribbon — a genuine
-    // per-point position morph (the circle MELTS into the wave, not a crossfade).
-    ctx.lineWidth = 2;
-    ctx.globalAlpha = reveal * (1 - 0.5 * morphE);
+    // --- 4. The main loop: N points that melt from the circle onto ribbon 0 ---
+    // At morphE=0 they trace the softly-irregular breathing circle; at morphE=1 a
+    // triangle sweep maps them across the FULL width onto the primary sine ribbon —
+    // a genuine per-point position morph (the circle MELTS into the wave).
+    ctx.lineWidth = 1.6;
+    // The body sprite already carries the bright rim; this live loop adds the
+    // organic wobble on top (and becomes the wave itself while talking).
+    ctx.globalAlpha = reveal * (0.55 + 0.45 * morphE);
     ctx.beginPath();
     for (let i = 0; i < N; i++) {
       const u = i / N;
       const theta = u * TWO_PI;
 
-      // Idle circle point (irregular hand-drawn rim: angular fbm wobble ~+/-4%).
+      // Idle circle point (subtle organic rim: angular fbm wobble ~+/-2%).
       const wob = fbm1(theta * 1.6 + ft * 0.12) - 0.5;
-      const pr = frEff * (1 + wob * 0.08);
+      const pr = frEff * (1 + wob * 0.04);
       const ix = fcx + Math.cos(theta) * pr;
       const iy = fcy + Math.sin(theta) * pr;
 
@@ -461,7 +566,7 @@ export async function init() {
     ctx.closePath();
     ctx.stroke();
 
-    // --- 4. Two extra layered ribbons (talking depth; fade in with the morph) ---
+    // --- 5. Two extra layered ribbons (talking depth; fade in with the morph) ---
     if (morphE > 0.01) {
       ctx.lineWidth = 2;
       drawRibbon(0.38, 3.7, 3.1, 1.3, reveal * 0.4 * morphE);

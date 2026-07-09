@@ -13,6 +13,7 @@
 import { state } from '../core/state-manager.js';
 import { bus } from '../core/event-bus.js';
 import { toolRouter } from '../core/tool-router.js';
+import { brainConnector } from '../connectors/brain-connector.js';
 
 // Match --t-med so the card's hidden flip lands exactly when the transition ends.
 const CLOSE_MS = 300;
@@ -40,6 +41,11 @@ let wakeSeg = null;
 let wakeOnBtn = null;   // the WŁĄCZONY option — dimmed when wake unavailable
 let statusEl = null;    // wake status line
 let userEl = null;      // KONTO username text
+// CONNECTORY — "Jurek's 2nd Brain" row refs (populated by buildConnectors()).
+let brainPill = null;   // status pill: connected | offline | locked
+let brainLockRow = null;// pass input + AKTYWUJ (shown when inactive)
+let brainPassInput = null;
+let brainActiveRow = null; // AKTYWNY + ROZŁĄCZ (shown when active)
 
 // ---------------------------------------------------------------------------
 // Segmented control — a row of options; the active one is inverted (white-on-black).
@@ -155,7 +161,10 @@ function build() {
   statusEl.setAttribute('aria-live', 'polite');
   wakeSec.append(wakeSeg.el, statusEl);
 
-  // 4. KONTO ----------------------------------------------------------------
+  // 4. CONNECTORY — "Jurek's 2nd Brain" (read + drafty; activated by LAN pass) --
+  const connSec = buildConnectors();
+
+  // 5. KONTO ----------------------------------------------------------------
   const accSec = section('KONTO');
   const accRow = document.createElement('div');
   accRow.className = 'settings-account';
@@ -169,7 +178,7 @@ function build() {
   accRow.append(userEl, logoutBtn);
   accSec.appendChild(accRow);
 
-  card.append(head, themeSec, soundSec, wakeSec, accSec);
+  card.append(head, themeSec, soundSec, wakeSec, connSec, accSec);
   backdrop.appendChild(card);
   root.appendChild(backdrop);
 
@@ -190,6 +199,102 @@ function build() {
 
   built = true;
   renderAll();
+}
+
+// ---------------------------------------------------------------------------
+// CONNECTORY — "Jurek's 2nd Brain". Visible but inactive until Jurek types the
+// LAN pass. brain-connector.js is the shared source of truth (brain-tools reads
+// the same activation + pass). Read is honest: pill probes the live bridge.
+// ---------------------------------------------------------------------------
+function buildConnectors() {
+  const sec = section('CONNECTORY');
+
+  const row = document.createElement('div');
+  row.className = 'connector-row';
+
+  const nameWrap = document.createElement('div');
+  nameWrap.className = 'connector-id';
+  const nm = document.createElement('span');
+  nm.className = 'connector-name';
+  nm.textContent = "Jurek's 2nd Brain";
+  const desc = document.createElement('span');
+  desc.className = 'connector-desc';
+  desc.textContent = 'Second brain (vault Obsidian) — odczyt + drafty';
+  nameWrap.append(nm, desc);
+
+  brainPill = document.createElement('span');
+  brainPill.className = 'connector-pill';
+  brainPill.textContent = '—';
+  row.append(nameWrap, brainPill);
+
+  // Locked: pass input + AKTYWUJ (Enter also activates).
+  brainLockRow = document.createElement('div');
+  brainLockRow.className = 'connector-activate';
+  brainPassInput = document.createElement('input');
+  brainPassInput.type = 'password';
+  brainPassInput.className = 'connector-pass';
+  brainPassInput.placeholder = 'hasło';
+  brainPassInput.setAttribute('aria-label', 'Hasło connectora 2nd Brain');
+  brainPassInput.autocomplete = 'off';
+  const actBtn = document.createElement('button');
+  actBtn.type = 'button';
+  actBtn.className = 'connector-btn';
+  actBtn.textContent = 'AKTYWUJ';
+  actBtn.addEventListener('click', activateBrain);
+  brainPassInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); activateBrain(); }
+  });
+  brainLockRow.append(brainPassInput, actBtn);
+
+  // Active: ROZŁĄCZ.
+  brainActiveRow = document.createElement('div');
+  brainActiveRow.className = 'connector-activate';
+  const offBtn = document.createElement('button');
+  offBtn.type = 'button';
+  offBtn.className = 'connector-btn';
+  offBtn.textContent = 'ROZŁĄCZ';
+  offBtn.addEventListener('click', () => { brainConnector.deactivate(); renderConnectors(); });
+  brainActiveRow.appendChild(offBtn);
+
+  sec.append(row, brainLockRow, brainActiveRow);
+  return sec;
+}
+
+async function activateBrain() {
+  const pass = ((brainPassInput && brainPassInput.value) || '').trim();
+  if (!pass) { bus.emit('toast', { text: 'Wpisz hasło connectora.', kind: 'warn' }); return; }
+  if (brainPill) brainPill.textContent = 'sprawdzam…';
+  const r = await brainConnector.verify(pass);
+  if (r === 'ok') {
+    brainConnector.activate(pass);
+    if (brainPassInput) brainPassInput.value = '';
+    bus.emit('toast', { text: '🧠 2nd Brain aktywny.', kind: 'info' });
+  } else if (r === 'badpass') {
+    bus.emit('toast', { text: 'Złe hasło connectora.', kind: 'warn' });
+  } else {
+    bus.emit('toast', { text: 'Most offline — nie mogę aktywować 2nd Brain.', kind: 'warn' });
+  }
+  renderConnectors();
+}
+
+function renderConnectors() {
+  if (!brainPill || !brainLockRow || !brainActiveRow) return;
+  const active = brainConnector.isActivated();
+  brainLockRow.hidden = active;
+  brainActiveRow.hidden = !active;
+  if (!active) {
+    brainPill.textContent = 'NIEAKTYWNY';
+    brainPill.dataset.status = 'locked';
+    return;
+  }
+  brainPill.textContent = 'sprawdzam…';
+  brainPill.dataset.status = 'checking';
+  brainConnector.probe().then((s) => {
+    // Guard: user may have deactivated while the probe was in flight.
+    if (!brainPill || !brainConnector.isActivated()) return;
+    brainPill.textContent = s === 'connected' ? 'POŁĄCZONY' : 'OFFLINE';
+    brainPill.dataset.status = s;
+  });
 }
 
 // ---- Renderers -------------------------------------------------------------
@@ -223,6 +328,7 @@ function renderAll() {
   renderWakeStatus();
   renderWakeDim();
   renderUser();
+  renderConnectors();
 }
 
 // ---- Open / close ----------------------------------------------------------
