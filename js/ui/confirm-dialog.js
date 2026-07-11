@@ -91,10 +91,12 @@ function injectStyle() {
 }
 
 /**
- * @param {{title?:string, body?:string, confirmLabel?:string, cancelLabel?:string}} opts
+ * @param {{title?:string, body?:string, bodyNode?:Node, confirmLabel?:string, cancelLabel?:string}} opts
+ *        bodyNode: an optional DOM element appended below the text (e.g. a live
+ *        widget preview). When given, `body` acts as a short caption above it.
  * @returns {Promise<boolean>} true if confirmed, false otherwise.
  */
-export function confirmDialog({ title = 'Potwierdź', body = '', confirmLabel = 'OK', cancelLabel = 'Anuluj' } = {}) {
+export function confirmDialog({ title = 'Potwierdź', body = '', bodyNode = null, confirmLabel = 'OK', cancelLabel = 'Anuluj' } = {}) {
   return new Promise((resolve) => {
     let settled = false;
     try { injectStyle(); } catch (_e) { /* styles are best-effort */ }
@@ -114,6 +116,8 @@ export function confirmDialog({ title = 'Potwierdź', body = '', confirmLabel = 
     const bodyEl = document.createElement('div');
     bodyEl.className = 'gz-confirm-body';
     bodyEl.textContent = body;
+    // Empty caption collapses so a node-only dialog has no dangling margin.
+    if (!body) bodyEl.style.display = 'none';
 
     const actions = document.createElement('div');
     actions.className = 'gz-confirm-actions';
@@ -129,7 +133,11 @@ export function confirmDialog({ title = 'Potwierdź', body = '', confirmLabel = 
     confirmBtn.textContent = confirmLabel;
 
     actions.append(cancelBtn, confirmBtn);
-    card.append(titleEl, bodyEl, actions);
+    card.append(titleEl, bodyEl);
+    // Optional live preview node (e.g. a sandboxed widget iframe) between the
+    // caption and the actions.
+    if (bodyNode instanceof Node) card.append(bodyNode);
+    card.append(actions);
     backdrop.appendChild(card);
     // Card clicks must not bubble to the backdrop's cancel handler.
     card.addEventListener('click', (e) => e.stopPropagation());

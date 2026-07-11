@@ -103,6 +103,26 @@ function runSkill(name, code) {
   layout.addWidget(skillWidgetDef(name, code));
 }
 
+// --- Live preview node for the confirm dialog (v4-h) ------------------------
+// The exact same locked sandbox the installed widget uses, sized to fit inside
+// the dialog. Jurek approves the RENDERED widget, not its code. Sandbox messages
+// (log/error/done) have no listener here — harmless, ignored.
+function previewNode(code) {
+  const wrap = document.createElement('div');
+  Object.assign(wrap.style, {
+    width: '100%', height: '260px', margin: '0 0 var(--space-5)',
+    border: '1px solid var(--line-bright)', borderRadius: 'var(--glass-radius-sm)',
+    overflow: 'hidden', background: 'var(--bg-raised)'
+  });
+  const frame = document.createElement('iframe');
+  frame.setAttribute('sandbox', 'allow-scripts');       // NO allow-same-origin — hard isolation
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  Object.assign(frame.style, { width: '100%', height: '100%', border: '0', background: 'transparent' });
+  frame.srcdoc = sandboxSrcdoc(code);
+  wrap.appendChild(frame);
+  return wrap;
+}
+
 // --- Build pipeline (non-blocking) ------------------------------------------
 async function buildAndInstall(description, nameHint) {
   const base = bridgeBase();
@@ -125,13 +145,15 @@ async function buildAndInstall(description, nameHint) {
   }
   const name = (nameHint || description).toLowerCase().replace(/[^a-z0-9ąćęłńóśźż ]/gi, '').trim().slice(0, 28) || 'skill';
 
-  // v4-g: Settings toggle can skip the code-preview confirmation. The skill still
-  // runs only inside the locked sandbox, so "install directly" stays safe.
+  // v4-g: Settings toggle can skip the confirmation. The skill still runs only
+  // inside the locked sandbox, so "install directly" stays safe.
   if (state.get('widgetConfirm') !== false) {
+    // v4-h: show a LIVE PREVIEW of the widget (same locked sandbox as the real
+    // one) instead of raw code — Jurek approves what he actually sees.
     const ok = await confirmDialog({
       title: 'Nowy widget: ' + name,
-      body: 'Gzowo wygenerował ten widget (uruchomi się w izolowanym sandboxie):\n\n' +
-        data.code.slice(0, 1400) + (data.code.length > 1400 ? '\n…' : ''),
+      body: 'Podgląd na żywo — zainstalować?',
+      bodyNode: previewNode(data.code),
       confirmLabel: 'Zainstaluj', cancelLabel: 'Odrzuć'
     });
     if (!ok) {
