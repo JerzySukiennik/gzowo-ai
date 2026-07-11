@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="css/auth.css" />
   <link rel="stylesheet" href="css/widgets.css" />
   <link rel="stylesheet" href="css/themes.css" />
+  <link rel="stylesheet" href="css/theme-ui-ux.css" />
 
   <!-- Import map MUST come before main.js. Pure ES modules from CDN, no build step.
        v2: avatar is Canvas 2D (no three.js) and wake uses vosk-browser via a direct
@@ -37,6 +38,10 @@
 </head>
 <body data-theme="mono" data-ui="auth">
   <div id="grid-bg"></div>
+  <!-- Theme scenery (v3 #15b): per-theme animated backdrop — trees+leaves (nature),
+       bubbles (water), starfield (gsp), fireworks+snow (newyear), soft blobs (gos).
+       Static CSS decor lives on #theme-scene; the canvas draws particles. -->
+  <div id="theme-scene" aria-hidden="true"><canvas id="scene-canvas"></canvas></div>
   <canvas id="avatar-canvas"></canvas>
   <main id="widget-layer"></main>
   <div id="chat-bubble" hidden></div>

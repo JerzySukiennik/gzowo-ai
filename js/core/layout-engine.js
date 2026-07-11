@@ -219,13 +219,30 @@ function computeShowingSlots(n, area, zone) {
     // Keep only cells clear of the avatar zone.
     const free = zone ? cells.filter((c) => !intersects(c, zone, 0)) : cells;
     if (free.length >= n) {
-      return { slots: free.slice(0, n), capped: false };
+      return { slots: free.slice(0, n).map(capSlotHeight), capped: false };
     }
     best = free; // remember the densest attempt in case we must cap
     extraCols++;
   }
   // Could not fit all — cap to what fits, queue the rest hidden (caller does).
-  return { slots: (best || []).slice(0, n), capped: true };
+  return { slots: (best || []).slice(0, n).map(capSlotHeight), capped: true };
+}
+
+// Widgets taller than this read badly (and feel "too low" — they run right down
+// to the islands). Cap a slot's height, keeping it vertically centered in its cell.
+// v4-b #6/#8: widgets were stretched to fill huge grid cells (a clock with a tiny
+// time floating in a wall of empty space). Cap BOTH dimensions to content-sane
+// maxima and centre the widget in its cell, so it sizes closer to its content.
+const MAX_SLOT_H = 360;
+const MAX_SLOT_W = 380;
+// Per-widget natural height so content-light widgets don't stretch into empty
+// space (v4-b #8). Absent = uses the generic MAX_SLOT_H.
+const NATURAL_MAX_H = { clock: 200, home: 300, bambu: 320, notes: 340 };
+function capSlotHeight(r) {
+  let { x, y, w, h } = r;
+  if (h > MAX_SLOT_H) { y += (h - MAX_SLOT_H) / 2; h = MAX_SLOT_H; }
+  if (w > MAX_SLOT_W) { x += (w - MAX_SLOT_W) / 2; w = MAX_SLOT_W; }
+  return rect(x, y, w, h);
 }
 
 /** Row-major grid cells over `area`, each inset by gap/2 (=> gap between cells). */
@@ -266,7 +283,7 @@ function singleSlot(area, zone) {
   const h = free.h * SINGLE_CAP;
   const x = free.x + (free.w - w) / 2;
   const y = free.y + (free.h - h) / 2;
-  return rect(x, y, w, h);
+  return capSlotHeight(rect(x, y, w, h));
 }
 
 // ============================================================================
@@ -425,6 +442,19 @@ function animate(node, keyframes, opts) {
     return { finished: Promise.resolve(), cancel() {} };
   }
   const anim = node.animate(keyframes, opts);
+  // v4 #14 + fix (2026-07-10, "widgets hide immediately"): a FINISHED fill:'both'
+  // animation keeps OVERRIDING element.style.transform/opacity forever (so gravity
+  // couldn't move widgets). We release it — but ONLY after COMMITTING the final
+  // keyframe to inline styles first. The earlier version cancelled WITHOUT
+  // committing, so a fly-in reverted to its pre-set opacity:0 and the widget
+  // vanished the instant it finished appearing. Commit → then cancel = visible
+  // final state stays, transform is free for gravity.
+  anim.finished.then(() => {
+    const last = keyframes[keyframes.length - 1] || {};
+    if (last.transform !== undefined) node.style.transform = last.transform;
+    if (last.opacity !== undefined) node.style.opacity = String(last.opacity);
+    try { anim.cancel(); } catch (_e) { /* torn down */ }
+  }).catch(() => { /* cancelled mid-flight (reflow) — fine */ });
   return anim;
 }
 
@@ -503,6 +533,33 @@ function trashPoint() {
 function commitSlot(entry, target, glideDelay) {
   const node = entry.node;
   const prev = entry.rect;
+  // Per-widget scale (assistant "zmniejsz/powiększ"). v4-b #7: scale > 1 now GROWS
+  // the widget (up to 2×) instead of being clamped to 1 — the grown box is then
+  // clamped to the safe area so it can't leave the screen. Growth may overlap a
+  // neighbour, which is an accepted trade for an explicit "zrób większy".
+  const sc = typeof entry.scale === 'number' && entry.scale > 0 ? Math.min(entry.scale, 2) : 1;
+  if (sc !== 1) {
+    const nw = target.w * sc, nh = target.h * sc;
+    let nx = target.x + (target.w - nw) / 2, ny = target.y + (target.h - nh) / 2;
+    if (sc > 1) {
+      const area = safeArea();
+      nx = clamp(nx, area.x, Math.max(area.x, area.x + area.w - nw));
+      ny = clamp(ny, area.y, Math.max(area.y, area.y + area.h - nh));
+    }
+    target = rect(nx, ny, nw, nh);
+  }
+  // v4-b #8: content-sized height per widget type — a clock needs ~200px, not a
+  // 360px column with empty space. Only when the user hasn't explicitly resized.
+  const nmax = NATURAL_MAX_H[entry.def && entry.def.id];
+  if (nmax && (!entry.scale || entry.scale === 1) && target.h > nmax) {
+    target = rect(target.x, target.y + (target.h - nmax) / 2, target.w, nmax);
+  }
+  // Square widgets (v4 #20, e.g. Żaba = a gif-sized tile): shrink the slot to a
+  // centered square, capped at entry.squareMax px.
+  if (entry.square) {
+    const side = Math.min(target.w, target.h, entry.squareMax || 300);
+    target = rect(target.x + (target.w - side) / 2, target.y + (target.h - side) / 2, side, side);
+  }
   // Write the new geometry (this is the layout property change — done WITHOUT
   // animation; motion is done purely via transform on top of the new box).
   node.style.left = px(target.x);
@@ -618,8 +675,12 @@ function doReflow(opts = {}) {
     if (glide) { glidePromises.push(glide); glideIndex++; }
 
     if (wasEntering && enterNew) {
-      // Start the widget at its box, invisible, then fly in with stagger.
-      entry.node.style.opacity = '0';
+      // BASE opacity = 1 (fix "widgets hide immediately"): the fly-in's fill:'both'
+      // backwards-fills opacity 0 during its stagger delay, so the widget is still
+      // invisible until it flies in — but the RESTING state is 1 no matter what
+      // happens to the animation (finishes, is cancelled by gravity, or is frozen
+      // in a background tab). Setting base 0 made a cancelled/committed anim vanish.
+      entry.node.style.opacity = '1';
       entry.mounted = true;
       const delay = enterIndex * MOTION.stagger;
       enterIndex++;
@@ -717,12 +778,19 @@ function scheduleReflow(opts) {
   }
   if (reflowScheduled) return;
   reflowScheduled = true;
-  requestAnimationFrame(() => {
+  // rAF for frame-sync + a 250ms timeout FALLBACK: rAF doesn't fire in hidden/
+  // background tabs, so a reflow scheduled during a background boot would leave
+  // reflowScheduled stuck true and DEADLOCK all future reflows (widgets stay
+  // display:none forever). First of the two to run wins; the loser no-ops.
+  const run = () => {
+    if (!reflowScheduled) return;
     reflowScheduled = false;
     const finalOpts = pendingReflowOpts || {};
     pendingReflowOpts = null;
     doReflow(finalOpts);
-  });
+  };
+  requestAnimationFrame(run);
+  setTimeout(run, 250);
 }
 
 // ============================================================================
@@ -895,6 +963,16 @@ function removeWidget(id, opts = {}) {
   // Survivors glide to fill the gap.
   scheduleReflow();
   emitWidgets();
+  maybeExitShowing();
+}
+
+/** v4 #1: an EMPTY showing state is pointless — when the last widget is gone
+ *  (assistant hid it, or it removed itself like Żaba), drop back to idle
+ *  (or talking if a voice session is open). Idempotent; guarded by the FSM. */
+function maybeExitShowing() {
+  if (state.ui !== 'showing' || widgets.size > 0) return;
+  const talking = state.get('voiceStatus') === 'open';
+  state.setUI(talking ? 'talking' : 'idle', 'showing-empty');
 }
 
 /**
@@ -975,6 +1053,7 @@ function clear(opts = {}) {
 
   scheduleReflow();
   emitWidgets();
+  maybeExitShowing();
   return { hidden: visibleVictims.length };
 }
 
@@ -1041,6 +1120,76 @@ function emitWidgets() {
 }
 
 // ============================================================================
+// Assistant widget CONTROL (v3 #12) — style/emphasis are immediate DOM ops (nodes
+// survive reflows, so they stick); scale/order re-run the layout.
+// ============================================================================
+/** Glow "aura" toggle around a widget ("podkreśl pogodę"). */
+function emphasizeWidget(id, on = true) {
+  const e = widgets.get(id);
+  if (!e) return false;
+  e.emphasis = !!on;
+  e.node.classList.toggle('is-emphasized', !!on);
+  return true;
+}
+
+/** Accent color (inside-body, design-legal) + opacity + custom border. */
+function styleWidget(id, opts = {}) {
+  const e = widgets.get(id);
+  if (!e) return false;
+  const node = e.node;
+  if ('accent' in opts) {
+    const a = opts.accent;
+    if (a == null || a === '') { node.style.removeProperty('--widget-accent'); e.accent = null; }
+    else { node.style.setProperty('--widget-accent', String(a)); e.accent = String(a); node.classList.add('has-accent'); }
+    if (a == null || a === '') node.classList.remove('has-accent');
+  }
+  if ('opacity' in opts) {
+    const o = Math.max(0.15, Math.min(1, Number(opts.opacity)));
+    if (Number.isFinite(o)) { node.style.setProperty('--widget-opacity', String(o)); e.opacity = o; }
+  }
+  return true;
+}
+
+/** Scale a widget (0.5–1 shrinks in place; >1 is treated as "make it primary"). */
+function scaleWidget(id, scale) {
+  const e = widgets.get(id);
+  if (!e) return false;
+  const s = Number(scale);
+  if (!Number.isFinite(s) || s <= 0) return false;
+  e.scale = s;
+  // >1 "bigger": also float it to the front so the grid gives it the roomy slot.
+  if (s > 1) { const i = order.indexOf(id); if (i > 0) { order.splice(i, 1); order.unshift(id); } }
+  scheduleReflow({ enterNew: false });
+  return true;
+}
+
+/** Constrain a widget to a centered square slot (v4 #20 — the Żaba tile). */
+function shapeWidget(id, opts = {}) {
+  const e = widgets.get(id);
+  if (!e) return false;
+  e.square = opts.square !== false;
+  if (Number.isFinite(Number(opts.max))) e.squareMax = Number(opts.max);
+  scheduleReflow({ enterNew: false });
+  return true;
+}
+
+/** Reorder a widget in the auto-layout: 'first' | 'last' | 'left' | 'right'. */
+function moveWidget(id, where) {
+  const i = order.indexOf(id);
+  if (i === -1) return false;
+  order.splice(i, 1);
+  if (where === 'first' || where === 'left') {
+    order.splice(where === 'left' ? Math.max(0, i - 1) : 0, 0, id);
+  } else if (where === 'right') {
+    order.splice(Math.min(order.length, i + 1), 0, id);
+  } else { // 'last' / default
+    order.push(id);
+  }
+  scheduleReflow({ enterNew: false });
+  return true;
+}
+
+// ============================================================================
 // Export — the assistant-only positioning API (no user-facing manipulation).
 // ============================================================================
 export const layout = {
@@ -1051,5 +1200,10 @@ export const layout = {
   pin,
   unpin,
   getWidgets,
-  reflow
+  reflow,
+  emphasizeWidget,
+  styleWidget,
+  scaleWidget,
+  moveWidget,
+  shapeWidget
 };

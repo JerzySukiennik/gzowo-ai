@@ -335,6 +335,76 @@ async function showNotes() {
   return { ok: true, count: notes.length };
 }
 
+// Re-render the notes widget IF it is on screen (after a delete). Silent no-op
+// otherwise — deleting notes must not force the widget onto the screen.
+async function refreshNotesWidgetIfVisible() {
+  try {
+    const visible = layout.getWidgets().some((w) => w.id === 'notes');
+    if (visible) await showNotes();
+  } catch (_e) { /* engine stub */ }
+}
+
+/** v4 #3: delete ONE note — newest note whose text contains the fragment. */
+async function deleteNote(args) {
+  const frag = String(args && args.text_fragment != null ? args.text_fragment : '').trim().toLowerCase();
+  if (!frag) return { ok: false, error: 'podaj fragment treści notatki do usunięcia' };
+
+  const db = getDbSafe();
+  const user = getUsernameSafe();
+  if (db && user) {
+    try {
+      const { collection, query, orderBy, getDocs, deleteDoc } = await loadFirestore();
+      const q = query(collection(db, 'users', user, 'notes'), orderBy('ts', 'desc'));
+      const snap = await getDocs(q);
+      let victim = null;
+      snap.forEach((d) => {
+        const data = d.data() || {};
+        if (!victim && typeof data.text === 'string' && data.text.toLowerCase().includes(frag)) {
+          victim = { ref: d.ref, text: data.text };
+        }
+      });
+      if (!victim) return { ok: false, error: 'nie znalazłem notatki zawierającej „' + frag + '"' };
+      await deleteDoc(victim.ref);
+      await refreshNotesWidgetIfVisible();
+      return { ok: true, deleted: victim.text.slice(0, 80) };
+    } catch (e) {
+      return { ok: false, error: 'nie udało się usunąć: ' + String((e && e.message) || e) };
+    }
+  }
+  // local fallback
+  const arr = lsGet(LS_NOTES, []);
+  const list = Array.isArray(arr) ? arr : [];
+  const idx = list.findIndex((n) => n && typeof n.text === 'string' && n.text.toLowerCase().includes(frag));
+  if (idx === -1) return { ok: false, error: 'nie znalazłem notatki zawierającej „' + frag + '"' };
+  const [gone] = list.splice(idx, 1);
+  lsSet(LS_NOTES, list);
+  await refreshNotesWidgetIfVisible();
+  return { ok: true, deleted: (gone && gone.text ? gone.text : '').slice(0, 80), stored: 'local' };
+}
+
+/** v4 #3: delete ALL notes (cloud + local mirror). The tool description makes
+ *  the model confirm with Jurek first — this is irreversible. */
+async function deleteAllNotes() {
+  let cloudDeleted = 0;
+  const db = getDbSafe();
+  const user = getUsernameSafe();
+  if (db && user) {
+    try {
+      const { collection, getDocs, deleteDoc } = await loadFirestore();
+      const snap = await getDocs(collection(db, 'users', user, 'notes'));
+      const jobs = [];
+      snap.forEach((d) => { jobs.push(deleteDoc(d.ref)); });
+      await Promise.all(jobs);
+      cloudDeleted = jobs.length;
+    } catch (e) {
+      return { ok: false, error: 'nie udało się wyczyścić chmury: ' + String((e && e.message) || e) };
+    }
+  }
+  lsSet(LS_NOTES, []);
+  await refreshNotesWidgetIfVisible();
+  return { ok: true, deleted: cloudDeleted };
+}
+
 const NOTE_TS_FMT = new Intl.DateTimeFormat('pl-PL', {
   day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
 });
@@ -559,10 +629,15 @@ export async function init() {
     );
 
     // --- NOTES --------------------------------------------------------------
+    // v4 #8 disambiguation: these are the QUICK APP NOTES (the NOTATKI widget,
+    // Firestore per-account) — NOT Jurek's second brain. The vault is served by
+    // the brain_* tools only; every description says so to stop the mix-ups.
     toolRouter.registerTool(
       {
         name: 'save_note',
-        description: 'Zapisuje notatkę (w chmurze użytkownika). Skill „NOTATKI”.',
+        description: 'Zapisuje SZYBKĄ NOTATKĘ w aplikacji (widget NOTATKI, chmura konta). ' +
+          'To NIE jest second brain Jurka — do vaulta/notatek z Obsidiana służy brain_draft. ' +
+          'Skill „NOTATKI”.',
         parameters: {
           type: 'object',
           properties: {
@@ -576,10 +651,36 @@ export async function init() {
     toolRouter.registerTool(
       {
         name: 'show_notes',
-        description: 'Pokazuje ostatnie notatki na widgecie. Skill „NOTATKI”.',
+        description: 'Pokazuje widget NOTATKI (szybkie notatki aplikacji — NIE second brain; ' +
+          'vault czytasz przez brain_index/brain_read). Skill „NOTATKI”.',
         parameters: { type: 'object', properties: {} }
       },
       gated('notes', showNotes)
+    );
+    toolRouter.registerTool(
+      {
+        name: 'delete_note',
+        description: 'Usuwa JEDNĄ szybką notatkę z aplikacji — najnowszą, której treść zawiera ' +
+          'podany fragment. Dotyczy widgetu NOTATKI, nie second braina. Skill „NOTATKI”.',
+        parameters: {
+          type: 'object',
+          properties: {
+            text_fragment: { type: 'string', description: 'Fragment treści notatki do usunięcia.' }
+          },
+          required: ['text_fragment']
+        }
+      },
+      gated('notes', deleteNote)
+    );
+    toolRouter.registerTool(
+      {
+        name: 'delete_all_notes',
+        description: 'Usuwa WSZYSTKIE szybkie notatki z aplikacji (nieodwracalne!). ZAWSZE ' +
+          'najpierw potwierdź z Jurkiem („na pewno usunąć wszystkie notatki?"). Nie dotyka ' +
+          'second braina. Skill „NOTATKI”.',
+        parameters: { type: 'object', properties: {} }
+      },
+      gated('notes', deleteAllNotes)
     );
 
     // --- COUNTDOWN ----------------------------------------------------------

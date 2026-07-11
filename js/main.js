@@ -52,15 +52,17 @@ async function load(path) {
 
 // Load every module up front (parallel). Nulls are tolerated everywhere below.
 const [
-  bridgeMod, soundMod, memoryMod, glassMod, toastsMod, layoutMod, avatarMod,
+  bridgeMod, soundMod, memoryMod, glassMod, sceneMod, toastsMod, layoutMod, avatarMod,
   islandsMod, chatMod, trashMod, settingsMod, customAuthMod, startupMod,
   personaMod, geminiMod, wakeMod, modesMod, widgetToolsMod, homeMod,
-  bambuMod, skillsMod, marketplaceMod, webEmbedMod, brainToolsMod
+  bambuMod, skillsMod, marketplaceMod, webEmbedMod, brainToolsMod, zabaMod, widgetCtrlMod, gravityMod, skillForgeMod, buildFlowMod, automationsMod,
+  notifyMod, scenesMod, memoryToolsMod, appleNotesMod, printerWatchMod, briefMod, launchMod, liveStyleMod
 ] = await Promise.all([
   load('./bridge-client.js'),
   load('./audio/sound.js'),
   load('./memory/firebase.js'),
   load('./ui/glass.js'),
+  load('./ui/theme-scene.js'),
   load('./ui/toasts.js'),
   load('./core/layout-engine.js'),
   load('./avatar/avatar.js'),
@@ -80,7 +82,21 @@ const [
   load('./skills/skills.js'),
   load('./skills/marketplace.js'),
   load('./widgets/web-embed.js'),
-  load('./voice/brain-tools.js')
+  load('./voice/brain-tools.js'),
+  load('./widgets/zaba.js'),
+  load('./widgets/widget-control.js'),
+  load('./core/gravity.js'),
+  load('./skills/skill-forge.js'),
+  load('./skills/build-flow.js'),
+  load('./skills/automations.js'),
+  load('./core/notify.js'),
+  load('./skills/scenes.js'),
+  load('./skills/memory-tools.js'),
+  load('./skills/apple-notes.js'),
+  load('./skills/printer-watch.js'),
+  load('./skills/brief.js'),
+  load('./skills/launch.js'),
+  load('./skills/live-style.js')
 ]);
 void personaMod; // referenced only for its side-effect-free data exports
 
@@ -102,6 +118,7 @@ await safeInit('bridge-client', () => bridgeMod?.bridgeClient?.init?.());
 await safeInit('sound',         () => soundMod?.init?.());
 await safeInit('memory',        () => memoryMod?.init?.());
 await safeInit('glass',         () => glassMod?.init?.());   // before UI builders — the observer then catches everything
+await safeInit('theme-scene',   () => sceneMod?.init?.());
 await safeInit('toasts',        () => toastsMod?.init?.());
 await safeInit('layout',        () => layoutMod?.layout?.init?.());
 await safeInit('avatar',        () => avatarMod?.init?.());
@@ -121,6 +138,20 @@ await safeInit('skills',        () => skillsMod?.init?.());
 await safeInit('marketplace',   () => marketplaceMod?.init?.());
 await safeInit('web-embed',     () => webEmbedMod?.init?.());
 await safeInit('brain-tools',   () => brainToolsMod?.init?.());
+await safeInit('zaba',          () => zabaMod?.init?.());
+await safeInit('widget-control',() => widgetCtrlMod?.init?.());
+await safeInit('gravity',       () => gravityMod?.init?.());
+await safeInit('skill-forge',   () => skillForgeMod?.init?.());
+await safeInit('build-flow',    () => buildFlowMod?.init?.());
+await safeInit('automations',   () => automationsMod?.init?.());
+await safeInit('notify',        () => notifyMod?.init?.());
+await safeInit('scenes',        () => scenesMod?.init?.());
+await safeInit('memory-tools',  () => memoryToolsMod?.init?.());
+await safeInit('apple-notes',   () => appleNotesMod?.init?.());
+await safeInit('printer-watch', () => printerWatchMod?.init?.());
+await safeInit('brief',         () => briefMod?.init?.());
+await safeInit('launch',        () => launchMod?.init?.());
+await safeInit('live-style',    () => liveStyleMod?.init?.());
 
 // ---- 5. Boot done ----------------------------------------------------------
 // custom-auth listens for this to release its deferred 'auth:ready'.

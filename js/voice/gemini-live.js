@@ -94,6 +94,19 @@ export async function init() {
     bus.on('chat:send', onChatSend);
     bus.on('mode:change', onModeChange);
     bus.on('startup:greet', onStartupGreet);
+    // A background job (e.g. the skill builder) finished → have Gzowo announce it
+    // OUT LOUD in the live session. Silent no-op when no session is open.
+    bus.on('assistant:announce', (p) => {
+      const text = p && p.text;
+      if (!text || !session) return;
+      try {
+        session.sendClientContent({
+          turns: [{ role: 'user', parts: [{ text: '[system] ' + text + ' — powiedz to Jurkowi krótko, po polsku, swoimi słowami.' }] }],
+          turnComplete: true
+        });
+        bumpAudioActivity();
+      } catch (err) { console.error('[gemini-live] announce failed', err); }
+    });
     // Reflect mute changes onto the output gain in real time.
     unsubMuted = state.subscribe('muted', applyMute);
 
@@ -257,9 +270,19 @@ async function connect(opts = {}) {
     // modes simply don't PLAY it and surface the outputTranscription as the reply.
     responseModalities: [Modality.AUDIO],
     speechConfig: {
-      voiceConfig: { prebuiltVoiceConfig: { voiceName: CONFIG.gemini.voiceName } }
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: CONFIG.gemini.voiceName } },
+      // Forced Polish TTS: without it the model guesses the locale per-utterance,
+      // which produced a lisp + Ukrainian-ish accent (Jurek, 2026-07-09).
+      languageCode: CONFIG.gemini.languageCode || 'pl-PL'
     },
-    systemInstruction: PERSONA + factBlock,
+    // Active text-skill mode (v4 #21): its instructions ride along into every
+    // NEW session while enabled, so "tryb" survives reconnects.
+    systemInstruction: PERSONA + factBlock + (() => {
+      const m = state.get('skillMode');
+      return m && m.instructions
+        ? '\n\nAKTYWNY TRYB „' + m.name + '": ' + m.instructions
+        : '';
+    })(),
     // Tools come from the shared router (built fresh per call), so every module's
     // init()-registered tool is visible to the model at connect time.
     tools: toolRouter.getDeclarations(),
@@ -333,7 +356,7 @@ function handleOpen() {
   // Startup greeting: send exactly ONE user turn with the required phrasing. The
   // persona has a compliance rule that echoes it verbatim, so Gzowo speaks the
   // greeting through this Live session. One-shot — cleared before sending.
-  if (pendingGreet) {
+  if (pendingGreet && session) {
     const name = pendingGreet;
     pendingGreet = null;
     try {
@@ -410,6 +433,7 @@ function handleMessage(message) {
     if (sc.inputTranscription && sc.inputTranscription.text) {
       userBuf += sc.inputTranscription.text;
       emitTranscript('user', userBuf, false);
+      cancelDashboardClose();   // Jurek keeps talking → the exchange isn't over (v4 #18)
     }
     if (sc.outputTranscription && sc.outputTranscription.text) {
       modelBuf += sc.outputTranscription.text;
@@ -427,11 +451,17 @@ function handleMessage(message) {
         memory.appendTranscript({ role: 'gzowo', text: modelBuf, ts: Date.now() });
         modelBuf = '';
       }
+      // Dashboard (v4 #18): the exchange may be over — arm the deferred close.
+      armDashboardClose();
+    } else if (sc.modelTurn) {
+      // New content mid-turn → any pending dashboard close was premature.
+      cancelDashboardClose();
     }
   }
 
   // ---- toolCall: dispatch through the shared router; send REAL results back ----
   if (message.toolCall && Array.isArray(message.toolCall.functionCalls)) {
+    cancelDashboardClose();   // tools mean the exchange continues (v4 #18)
     handleToolCalls(message.toolCall.functionCalls);
   }
 }
@@ -553,6 +583,7 @@ function onToggle() {
     setStatus('closed');
     if (state.ui === 'talking') state.setUI('idle', 'voice:toggle');
   } else {
+    wakeSession = false;   // manual GŁOS click = continuous conversation (v4 #18)
     connect().catch((e) => console.error('[gemini-live] toggle connect', e));
   }
 }
@@ -560,8 +591,42 @@ function onToggle() {
 function onWake() {
   // Open the session; the wake sound itself is owned by wake-word.js.
   if (!session && !connecting) {
+    wakeSession = true;    // dashboard mode may end this session after 1 exchange
     connect().catch((e) => console.error('[gemini-live] wake connect', e));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard mode (v4 #18, Jurek's decision: WAKE-initiated sessions only).
+// After the model finishes an exchange (turnComplete) we wait for the speech to
+// finish PLAYING plus a short grace window; if nothing new arrived, the session
+// closes and the app returns to idle — where the wake listener re-arms and waits
+// for the next „Hej Gzowo". Any new audio/tool activity cancels the pending close.
+// ---------------------------------------------------------------------------
+let wakeSession = false;
+let dashCloseTimer = 0;
+
+function cancelDashboardClose() {
+  if (dashCloseTimer) { clearTimeout(dashCloseTimer); dashCloseTimer = 0; }
+}
+
+function armDashboardClose() {
+  if (!state.get('dashboardMode') || !wakeSession || !session) return;
+  cancelDashboardClose();
+  // Remaining scheduled playback (audio-out queue) + grace for stragglers.
+  let waitMs = 800;
+  try {
+    if (outCtx) waitMs += Math.max(0, (nextStartTime - outCtx.currentTime) * 1000);
+  } catch (_e) { /* no audio out (text mode) — just the grace */ }
+  dashCloseTimer = window.setTimeout(() => {
+    dashCloseTimer = 0;
+    if (!state.get('dashboardMode') || !wakeSession || !session) return;
+    console.info('[gemini-live] dashboard: exchange done — closing, waiting for the next wake');
+    wakeSession = false;
+    closeSessionDeliberately();
+    setStatus('closed');
+    if (state.ui === 'talking') state.setUI('idle', 'dashboard-close');
+  }, waitMs);
 }
 
 /**
@@ -658,7 +723,10 @@ async function startAudioIn() {
   if (inCtx) return; // already running
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+      // AEC on (removes Gzowo's own voice from the mic so barge-in works without
+      // false self-interrupts); AGC OFF so it never pumps residual echo up over
+      // the barge threshold (v4-c #2 — "can't interrupt").
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false }
     });
   } catch (err) {
     // GŁOS→GŁOS must never fail silently. Tell the user exactly what to do.
@@ -697,6 +765,15 @@ async function startAudioIn() {
 /**
  * @param {MessageEvent<Float32Array>} ev
  */
+// True while scheduled audio-out is still playing (+150ms tail). Used for the
+// half-duplex gate below.
+function isSpeaking() {
+  return !!(outCtx && (nextStartTime - outCtx.currentTime) > -0.15);
+}
+// Speech that passes through while Gzowo talks = a deliberate barge-in (v4-c #2:
+// lowered from 0.085 so normal-volume speech interrupts; AEC keeps echo below it).
+const BARGE_RMS = 0.045;
+
 function onMicChunk(ev) {
   const f32 = ev.data;
   if (!f32 || !f32.length) return;
@@ -705,6 +782,13 @@ function onMicChunk(ev) {
   let sum = 0;
   for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
   const rms = Math.sqrt(sum / f32.length);
+
+  // HALF-DUPLEX (v4-b #1/#2): while Gzowo is SPEAKING, the mic hears its own
+  // voice echo — sending it made the model think it was interrupted and cut off
+  // mid-sentence (so it "didn't say what it wrote"). We drop quiet input during
+  // playback; only loud, deliberate speech (a real barge-in) still gets through.
+  if (isSpeaking() && rms < BARGE_RMS) return;
+
   emitAmplitude(Math.min(1, rms * 4), 'in');
 
   if (!session) return;

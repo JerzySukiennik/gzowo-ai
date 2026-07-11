@@ -71,6 +71,12 @@ const WEB_CSS = `
   color:var(--fg-dim);}
 .web-empty-hint{max-width:36ch;font-size:var(--text-xs);line-height:1.6;
   color:var(--fg-faint);}
+.web-reader{position:absolute;inset:0;overflow-y:auto;padding:var(--space-4)
+  var(--space-5);background:var(--bg-raised);font-family:var(--font-mono);}
+.web-reader-title{margin-bottom:var(--space-3);font-size:var(--text-md);
+  letter-spacing:var(--tracking);color:var(--fg);}
+.web-reader-text{font-size:var(--text-sm);line-height:1.7;color:var(--fg-dim);
+  white-space:pre-wrap;overflow-wrap:anywhere;}
 `;
 
 function injectStyle(bodyEl) {
@@ -141,13 +147,34 @@ function embedUrl(id) {
 // ---------------------------------------------------------------------------
 // Widget definitions
 // ---------------------------------------------------------------------------
+// --- Cascade helpers (v3 #13: iframe → bridge proxy → readable text) ---------
+function bridgeBase() {
+  const b = (CONFIG.bridge && CONFIG.bridge.url) ? String(CONFIG.bridge.url) : '';
+  return b.replace(/\/$/, '');
+}
+function bridgeUp() {
+  try { return Boolean(bridgeClient && bridgeClient.online && bridgeClient.online()); }
+  catch (_e) { return false; }
+}
+
 /**
  * The real embedding widget. `id` is fixed 'web' (single web view at a time).
- * @param {string} url            an http(s) page URL, or a YouTube embed URL.
- * @param {string} [titleOverride] header label (e.g. 'YOUTUBE'); defaults to
- *        'WEB · <hostname>'.
+ *
+ * v3 #13 cascade — the old "sad tab" was Chrome's own error page inside a frame
+ * blocked by X-Frame-Options (its `load` fires, so our cover vanished and the
+ * corpse stayed). Now, with the bridge up:
+ *   0. /embed-check reads the REAL X-Frame-Options/CSP verdict server-side,
+ *   1. allowed  → direct iframe (full interactivity),
+ *   2. blocked  → bridge /proxy (headers die at the bridge; same-origin document
+ *      so failure is READABLE via the gz-proxy-error marker),
+ *   3. proxy failed → readable text fallback (title + excerpt via /fetch).
+ * Without the bridge (Pages/lite): direct iframe + timeout → honest block panel.
+ *
+ * @param {string} url             an http(s) page URL, or a YouTube embed URL.
+ * @param {string} [titleOverride] header label (e.g. 'YOUTUBE').
+ * @param {{direct?:boolean}} [opts] direct:true = never proxy (YouTube embeds).
  */
-export function webDef(url, titleOverride) {
+export function webDef(url, titleOverride, opts = {}) {
   const host = hostOf(url);
   const title = titleOverride || ('WEB · ' + host);
   return defineWidget({
@@ -171,13 +198,13 @@ export function webDef(url, titleOverride) {
       frame.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
       frame.setAttribute('referrerpolicy', 'no-referrer');
       frame.setAttribute('title', title);
-      frame.src = url;
 
       // Loading cover (pulsing 'ŁADUJĘ…') — hidden once we settle.
       const cover = el('div', 'web-cover');
       cover.append(el('span', 'web-cover-txt', 'ŁADUJĘ…'));
 
-      // Honest block panel — shown only if the site refuses embedding.
+      // Honest block panel — the LAST resort (no bridge, or every stage failed
+      // and even the text fetch came back empty).
       const blocked = el('div', 'web-blocked');
       blocked.style.display = 'none';
       blocked.append(
@@ -187,42 +214,127 @@ export function webDef(url, titleOverride) {
           'Mogę ją pobrać i streścić — powiedz „pobierz treść tej strony”.')
       );
 
-      stage.append(frame, cover, blocked);
+      // Readable-fallback panel (stage 3) — filled lazily from /fetch.
+      const reader = el('div', 'web-reader');
+      reader.style.display = 'none';
+
+      stage.append(frame, cover, blocked, reader);
       root.append(bar, stage);
       bodyEl.append(root);
 
-      // --- Block detection ---------------------------------------------------
-      // Cross-origin iframes don't surface useful errors, so we keep it simple:
-      //   load  -> assume ok, hide the cover.
-      //   6s w/ no load -> assume the site blocks embedding, show the panel.
-      // Either path clears the cover, so there is never an infinite spinner.
-      let settled = false;
+      let dead = false;      // cleanup ran
+      let settled = false;   // some stage succeeded/failed terminally
       let timer = 0;
 
-      function markLoaded() {
-        if (settled) return;
+      function clearTimer() { if (timer) { clearTimeout(timer); timer = 0; } }
+      function showFrameOk() {
+        if (dead || settled) return;
         settled = true;
-        if (timer) { clearTimeout(timer); timer = 0; }
+        clearTimer();
         cover.style.display = 'none';
       }
-      function markBlocked() {
-        if (settled) return;
+      function showBlockedPanel() {
+        if (dead) return;
         settled = true;
-        if (timer) { clearTimeout(timer); timer = 0; }
+        clearTimer();
         cover.style.display = 'none';
+        frame.style.display = 'none';
         blocked.style.display = 'flex';
       }
 
-      frame.addEventListener('load', markLoaded);
-      frame.addEventListener('error', markBlocked); // rarely fires, but honest if it does
-      timer = setTimeout(markBlocked, BLOCK_TIMEOUT_MS);
+      // Stage 3: readable text (title + excerpt) rendered inside the widget.
+      async function showReader() {
+        if (dead) return;
+        settled = true;
+        clearTimer();
+        frame.style.display = 'none';
+        try {
+          const r = await bridgeClient.fetchPage(url);
+          if (dead) return;
+          cover.style.display = 'none';
+          if (r && r.ok && (r.text || r.title)) {
+            reader.replaceChildren(
+              el('div', 'web-reader-title', r.title || host),
+              el('div', 'web-reader-text', String(r.text || '').slice(0, EXCERPT_CAP))
+            );
+            reader.style.display = 'block';
+          } else {
+            showBlockedPanel();
+          }
+        } catch (_e) {
+          if (!dead) showBlockedPanel();
+        }
+      }
 
-      // cleanup: kill the timer + tear down the iframe so any audio/video stops
-      // the moment the widget is hidden or trashed.
+      // Stage 2: bridge proxy — same-origin, so success/failure is READABLE.
+      function loadViaProxy() {
+        if (dead) return;
+        settled = false;
+        cover.style.display = 'flex';
+        frame.style.display = '';
+        const onProxyLoad = () => {
+          if (dead) return;
+          let failed = false;
+          try {
+            const doc = frame.contentDocument;
+            failed = !doc || Boolean(doc.querySelector('meta[name="gz-proxy-error"]'));
+          } catch (_e) {
+            failed = false; // opaque (site JS re-navigated) — count as loaded
+          }
+          frame.removeEventListener('load', onProxyLoad);
+          if (failed) showReader();
+          else showFrameOk();
+        };
+        frame.addEventListener('load', onProxyLoad);
+        clearTimer();
+        timer = setTimeout(() => { if (!settled) showReader(); }, BLOCK_TIMEOUT_MS + 4000);
+        frame.src = bridgeBase() + '/proxy?url=' + encodeURIComponent(url);
+      }
+
+      // Stage 1: direct iframe (used when allowed / no bridge / opts.direct).
+      function loadDirect(escalate) {
+        if (dead) return;
+        settled = false;
+        cover.style.display = 'flex';
+        frame.style.display = '';
+        const onLoad = () => { frame.removeEventListener('load', onLoad); showFrameOk(); };
+        frame.addEventListener('load', onLoad);
+        clearTimer();
+        timer = setTimeout(() => {
+          if (settled) return;
+          if (escalate && bridgeUp()) loadViaProxy();
+          else showBlockedPanel();
+        }, BLOCK_TIMEOUT_MS);
+        frame.src = url;
+      }
+
+      // --- Kick off the cascade ---------------------------------------------
+      if (opts.direct || !bridgeUp()) {
+        // YouTube (embeds allowed by design) or lite mode: direct, old behavior.
+        loadDirect(false);
+      } else {
+        // Ask the bridge for the real X-Frame-Options/CSP verdict first, so the
+        // sad Chrome error page can never appear.
+        fetch(bridgeBase() + '/embed-check?url=' + encodeURIComponent(url), {
+          signal: AbortSignal.timeout(9000)
+        })
+          .then((r) => r.json())
+          .then((v) => {
+            if (dead) return;
+            if (v && v.ok && v.embeddable) loadDirect(true);
+            else if (v && v.ok && v.reachable === false) showReader(); // dead site → try text anyway
+            else loadViaProxy();
+          })
+          .catch(() => { if (!dead) loadViaProxy(); });
+        // Safety: if nothing settles in 20s, fall to the reader.
+        timer = setTimeout(() => { if (!settled) showReader(); }, 20000);
+      }
+
+      // cleanup: kill timers + tear down the iframe so audio/video stops the
+      // moment the widget is hidden or trashed.
       return () => {
-        if (timer) { clearTimeout(timer); timer = 0; }
-        frame.removeEventListener('load', markLoaded);
-        frame.removeEventListener('error', markBlocked);
+        dead = true;
+        clearTimer();
         try { frame.src = 'about:blank'; } catch (_e) { /* ignore */ }
         try { frame.remove(); } catch (_e) { /* ignore */ }
       };
@@ -332,7 +444,7 @@ async function showYoutubeHandler(args) {
     return { ok: false, error: 'nie rozpoznaję linku do YouTube — poproś Jurka o pełny link' };
   }
   try {
-    mountWeb(webDef(embed, 'YOUTUBE'));
+    mountWeb(webDef(embed, 'YOUTUBE', { direct: true }));
   } catch (_e) {
     return { ok: false, error: 'nie udało się osadzić filmu' };
   }

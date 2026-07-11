@@ -8,7 +8,12 @@ worker/.dev.vars
 
 # Deps + OS junk
 node_modules/
+.bughunt/
 .DS_Store
 
 # Vosk wake-word model (~53MB) — served locally by the bridge, never in git
 models/
+
+# Home lamp↔room map — personal home topology (entity ids, room names). Lives on
+# the Mac's bridge, auto-generated/learned; keep it OUT of the public repo.
+bridge/ha-rooms.json

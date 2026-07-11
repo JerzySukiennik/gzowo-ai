@@ -15,6 +15,10 @@
 .widget-body {
   --wx-accent: #7fb8ff; /* weather */
   --tmr-accent: #ffd166; /* timer, <10s ring only */
+  /* v4-b #8: make the body a size container so its contents can scale to the
+     frame with cq units (fills the widget instead of leaving empty space). */
+  container-type: size;
+  container-name: wb;
 }
 
 /* Every widget internal is a flex column that owns the full body box. */
@@ -101,6 +105,19 @@
 }
 .wx-meta-item b { color: var(--fg); font-weight: 600; }
 
+/* v4-b #6: compact weather variants (wind/temp) — big, centred, no empty space. */
+.wx--compact { justify-content: center; align-items: center; }
+.wx-big { display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: clamp(var(--space-1), 2cqh, var(--space-3)); text-align: center; height: 100%; }
+.wx-big-icon { width: clamp(2rem, 26cqw, 5rem); color: var(--wx-accent); }
+.wx-big-val { font-family: var(--font-mono); font-size: clamp(2rem, min(30cqw, 34cqh), 7rem);
+  line-height: 1; color: var(--fg); font-variant-numeric: tabular-nums;
+  max-width: 100%; display: flex; align-items: baseline; justify-content: center; }
+.wx-big-unit { font-size: 0.4em; color: var(--fg-dim); margin-left: 0.15em; }
+.wx-big-label { font-size: clamp(0.8rem, 6cqw, 1.6rem); color: var(--fg-dim); text-transform: lowercase; }
+.wx-big-sub { font-size: clamp(0.65rem, 4cqw, 1.1rem); color: var(--fg-faint); }
+.wx-strip-only { flex: 1; align-items: center; }
+
 .wx-strip {
   display: flex;
   gap: clamp(var(--space-2), 3%, var(--space-4));
@@ -164,8 +181,12 @@
 }
 .clk-time {
   font-family: var(--font-mono);
-  font-size: clamp(1.8rem, 26%, 5.5rem);
+  /* Fit BOTH axes (v4-c #3 — "HH:MM:SS" overflowed at 24cqw): 16cqw fits the
+     8-char width, 30cqh caps the height; min() takes whichever is smaller. */
+  font-size: clamp(1.4rem, min(16cqw, 30cqh), 5rem);
   line-height: 1;
+  max-width: 100%;
+  overflow: hidden;
   font-variant-numeric: tabular-nums;
   color: var(--fg);
   letter-spacing: -0.01em;
@@ -179,7 +200,7 @@
 }
 .clk-date {
   font-family: var(--font-mono);
-  font-size: clamp(var(--text-xs), 7%, var(--text-md));
+  font-size: clamp(var(--text-xs), 4.5cqw, 1.1rem);
   color: var(--fg-dim);
   letter-spacing: var(--tracking);
   text-transform: lowercase;

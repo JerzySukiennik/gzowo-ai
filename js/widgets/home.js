@@ -300,18 +300,192 @@ async function homeStatusHandler() {
   }
 }
 
-const controlHomeDecl = {
-  name: 'control_home',
-  description: 'Steruje encją Home Assistant (np. światłem). Podaj entity_id (np. ' +
-    '"light.salon"), service (turn_on / turn_off / toggle) i opcjonalnie value 0–100 dla ' +
-    'jasności (mapuje się na brightness_pct). ZAWSZE potwierdź z Jurkiem, zanim wykonasz akcję ' +
-    'nieodwracalną lub potencjalnie niebezpieczną (otwarcie zamka/bramy, wyłączenie ogrzewania, ' +
-    'uruchomienie urządzenia grzewczego/silnika). Odpowiedź mówi prawdę — nie twierdź, że się ' +
-    'udało, jeśli ok nie jest true.',
+// --- home_devices: entity discovery so the model NEVER asks Jurek for ids -----
+const homeDevicesDecl = {
+  name: 'home_devices',
+  description: 'Zwraca listę sterowalnych urządzeń Home Assistant (światła, przełączniki, ' +
+    'sceny): entity_id + nazwa + stan. ZAWSZE wywołaj to NAJPIERW, gdy Jurek prosi o ' +
+    'włączenie/wyłączenie czegoś — dopasuj urządzenie po nazwie/pokoju z tej listy i użyj jego ' +
+    'entity_id w control_home. NIGDY nie proś Jurka o entity_id. Jeśli pasuje kilka, zapytaj ' +
+    'które (podając nazwy).',
   parameters: {
     type: 'object',
     properties: {
-      entity_id: { type: 'string', description: 'Encja HA, np. "light.salon".' },
+      domain: {
+        type: 'string',
+        description: 'Opcjonalny filtr: light | switch | scene. Bez filtra zwraca wszystkie trzy.'
+      }
+    },
+    required: []
+  }
+};
+
+// v4-b #9: the user-maintained light↔room map (bridge/ha-rooms.json via /ha/rooms).
+async function loadRoomMap() {
+  try {
+    const base = ((window.GZOWO_CONFIG || {}).bridge || {}).url || '';
+    const res = await fetch(base.replace(/\/$/, '') + '/ha/rooms', { cache: 'no-store' });
+    const data = await res.json();
+    return Array.isArray(data.lights) ? data.lights : [];
+  } catch (_e) { return []; }
+}
+
+async function homeDevicesHandler(args = {}) {
+  if (!ha.available()) {
+    return { ok: false, error: 'Home Assistant niepodłączony — ' + ha.reason() };
+  }
+  const domains = ['light', 'switch', 'scene'];
+  const wanted = typeof args.domain === 'string' && domains.includes(args.domain)
+    ? [args.domain] : domains;
+  // Most `switch.*` entities are device CONFIG toggles (LED, auto-off, child-lock…),
+  // not lamps — including all 300+ drowned the real lamp-switches. Drop the config
+  // ones; keep switches in the room map, named like a lamp, or with no sub-suffix.
+  const SWITCH_NOISE = /_led$|_auto_off|_auto_update|_enabled$|_overload|_cloud|_signal|_consumption|_voltage|_current$|_power_protection|_child_lock|_inching|_indicator|_backlight|_do_not_disturb|_power_on|_relay_status|_night_light|_status_led/i;
+  try {
+    const [lists, roomMap] = await Promise.all([
+      Promise.all(wanted.map((d) => ha.listByDomain(d))),
+      loadRoomMap()
+    ]);
+    const rooms = new Map(roomMap.map((r) => [r.entity_id, r.rooms || []]));
+    const inMap = new Set(roomMap.map((r) => r.entity_id));
+    const devices = lists.flat().filter((s) => {
+      if (!String(s.entity_id).startsWith('switch.')) return true;   // lights/scenes: keep all
+      if (inMap.has(s.entity_id)) return true;                       // user marked it a lamp
+      if (SWITCH_NOISE.test(s.entity_id)) return false;              // config sub-entity
+      const n = ((s.attributes && s.attributes.friendly_name) || '').toLowerCase();
+      return /lamp|świat|swiat|żyrand|zyrand|kinkiet|sufit|taśm|tasm/.test(n);
+    }).map((s) => ({
+      entity_id: s.entity_id,
+      name: (s.attributes && s.attributes.friendly_name) || s.entity_id,
+      state: s.state,
+      rooms: rooms.get(s.entity_id) || []
+    }));
+    return { ok: true, count: devices.length, devices };
+  } catch (err) {
+    return { ok: false, error: friendlyErr(err) };
+  }
+}
+
+const controlRoomDecl = {
+  name: 'control_room',
+  description: 'Włącza/wyłącza/ŚCIEMNIA WSZYSTKIE światła w danym POKOJU/MIEJSCU (np. „zapal wszystkie ' +
+    'światła w salonie", „przygaś dom do 20%"). Miejsca z mapy Jurka (ha-rooms.json). service: ' +
+    'turn_on/turn_off. Opcjonalnie value 0–100 = jasność (przy turn_on) — użyj do ściemniania. ' +
+    'Jeśli mapa pusta albo pokój nieznany — powiedz to wprost.',
+  parameters: {
+    type: 'object',
+    properties: {
+      room: { type: 'string', description: 'Nazwa pokoju/miejsca, np. "salon", "dom".' },
+      service: { type: 'string', description: 'turn_on albo turn_off.' },
+      value: { type: 'number', description: 'Opcjonalnie 0–100: jasność (brightness_pct) przy turn_on.' }
+    },
+    required: ['room', 'service']
+  }
+};
+
+async function controlRoomHandler(args = {}) {
+  const room = String(args.room || '').toLowerCase().trim();
+  const service = String(args.service || '').trim();
+  const value = args.value;
+  if (!room) return { ok: false, error: 'podaj pokój/miejsce' };
+  if (service !== 'turn_on' && service !== 'turn_off') {
+    return { ok: false, error: 'service musi być turn_on albo turn_off' };
+  }
+  if (!ha.available()) return { ok: false, error: 'Home Assistant niepodłączony — ' + ha.reason() };
+
+  const map = await loadRoomMap();
+  if (!map.length) {
+    return { ok: false, error: 'Mapa pokoi jest pusta — Jurek musi uzupełnić bridge/ha-rooms.json (pola rooms).' };
+  }
+  const targets = map.filter((r) => (r.rooms || []).some((x) => String(x).toLowerCase().trim() === room));
+  if (!targets.length) {
+    const known = [...new Set(map.flatMap((r) => r.rooms || []))];
+    return { ok: false, error: 'Nie znam miejsca „' + room + '". Znane: ' + (known.join(', ') || 'brak') + '.' };
+  }
+  // brightness_pct only applies to lights on turn_on; switches ignore it.
+  const useBright = service === 'turn_on' && value != null && Number.isFinite(Number(value));
+  const results = [];
+  for (const t of targets) {
+    const domain = t.entity_id.includes('.') ? t.entity_id.slice(0, t.entity_id.indexOf('.')) : 'light';
+    const data = { entity_id: t.entity_id };
+    if (useBright && domain === 'light') data.brightness_pct = Math.max(0, Math.min(100, Number(value)));
+    try {
+      await ha.callService(domain, service, data);
+      results.push({ entity_id: t.entity_id, name: t.name, ok: true });
+    } catch (_e) {
+      results.push({ entity_id: t.entity_id, name: t.name, ok: false });
+    }
+  }
+  const okCount = results.filter((r) => r.ok).length;
+  return {
+    ok: okCount > 0,
+    room,
+    service,
+    affected: okCount,
+    total: targets.length,
+    lights: results.map((r) => r.name)
+  };
+}
+
+// --- learn_lamp: remember a lamp Jurek named that wasn't in the map (v4-g) ------
+const learnLampDecl = {
+  name: 'learn_lamp',
+  description: 'ZAPAMIĘTUJE NA STAŁE lampę, której nie było na liście urządzeń. Użyj, gdy home_devices ' +
+    'jej nie pokazało, a Jurek podał jej entity_id (albo powiedział „to jest ta lampa") i sterowanie ' +
+    'zadziałało — wtedy dopisz ją do mapy, żeby na przyszłość była widoczna i łapały ją komendy ' +
+    'pokojowe. Podaj entity_id (light.* lub switch.*), name (przyjazna nazwa) i rooms (miejsca, ' +
+    'np. ["salon","dom"]) jeśli Jurek je powiedział. Po zapisie krótko potwierdź, że zapamiętałeś.',
+  parameters: {
+    type: 'object',
+    properties: {
+      entity_id: { type: 'string', description: 'Encja HA lampy, np. "switch.lampa_biurko".' },
+      name: { type: 'string', description: 'Przyjazna nazwa, np. „Lampka biurko".' },
+      rooms: { type: 'array', items: { type: 'string' }, description: 'Miejsca, np. ["salon","dom"].' }
+    },
+    required: ['entity_id']
+  }
+};
+
+async function learnLampHandler(args = {}) {
+  const entity_id = String(args.entity_id || '').trim();
+  if (!/^(light|switch)\.[a-z0-9_]+$/i.test(entity_id)) {
+    return { ok: false, error: 'entity_id musi być light.* albo switch.*' };
+  }
+  const base = ((window.GZOWO_CONFIG || {}).bridge || {}).url || '';
+  let res;
+  try {
+    res = await fetch(base.replace(/\/$/, '') + '/ha/rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entity_id, name: args.name, rooms: args.rooms })
+    });
+  } catch (_e) {
+    return { ok: false, error: 'most nieosiągalny — nie zapisałem lampy' };
+  }
+  let data = null;
+  try { data = await res.json(); } catch (_e) { /* non-JSON */ }
+  if (!res.ok || !data || !data.ok) {
+    return { ok: false, error: (data && data.error) || 'nie udało się zapisać lampy' };
+  }
+  bus.emit('toast', { text: '💡 Zapamiętałem lampę: ' + (data.name || entity_id) +
+    (data.rooms && data.rooms.length ? ' (' + data.rooms.join(', ') + ')' : ''), kind: 'info' });
+  return { ok: true, learned: data.learned, name: data.name, rooms: data.rooms, is_new: data.is_new };
+}
+
+const controlHomeDecl = {
+  name: 'control_home',
+  description: 'Steruje encją Home Assistant (np. światłem). entity_id weź z home_devices ' +
+    '(dopasuj po nazwie — NIE pytaj Jurka o id), service: turn_on / turn_off / toggle, ' +
+    'opcjonalnie value 0–100 dla jasności. NIE DOPYTUJ o to, co Jurek już powiedział: ' +
+    '„zapal/włącz" = turn_on, „zgaś/wyłącz" = turn_off — wykonuj od razu, bez pytania ' +
+    '„włączyć czy wyłączyć?". Wynik ma verified_state = realny stan po akcji (z odczekaniem, ' +
+    'bo HA raportuje z opóźnieniem); changed:true = zadziałało, powiedz krótko „zapalone". ' +
+    'Gdy changed:false, zobacz pole note — nie strasz Jurka pytaniami o prąd. ZAWSZE potwierdź ' +
+    'akcję nieodwracalną/niebezpieczną (zamek, brama, ogrzewanie, silnik).',
+  parameters: {
+    type: 'object',
+    properties: {
+      entity_id: { type: 'string', description: 'Encja HA z home_devices, np. "light.salon".' },
       service: { type: 'string', description: 'Usługa HA: turn_on, turn_off, toggle itp.' },
       value: { type: 'number', description: 'Opcjonalnie 0–100: jasność (brightness_pct).' }
     },
@@ -319,13 +493,22 @@ const controlHomeDecl = {
   }
 };
 
+// Read back the entity's REAL state after a service call (single source of truth
+// for what the model may claim). Returns the trimmed state object or null.
+async function readEntity(entityId) {
+  const domain = entityId.includes('.') ? entityId.slice(0, entityId.indexOf('.')) : entityId;
+  const states = await ha.listByDomain(domain);
+  return (Array.isArray(states) ? states : [])
+    .find((s) => s && s.entity_id === entityId) || null;
+}
+
 async function controlHomeHandler(args = {}) {
   const entityId = args.entity_id;
   const service = args.service;
   const value = args.value;
 
   if (typeof entityId !== 'string' || !entityId) {
-    return { ok: false, error: 'Brak entity_id.' };
+    return { ok: false, error: 'Brak entity_id — najpierw wywołaj home_devices i dopasuj po nazwie.' };
   }
   if (typeof service !== 'string' || !service) {
     return { ok: false, error: 'Brak nazwy usługi (service).' };
@@ -340,8 +523,37 @@ async function controlHomeHandler(args = {}) {
   if (value != null) data.brightness_pct = value;
 
   try {
+    // HA answers 200 with an empty changed-states array even for a NONEXISTENT
+    // entity — that used to read as success and made Gzowo lie ("zapaliłem").
+    // Truth now comes from re-reading the entity itself.
+    const before = await readEntity(entityId);
+    if (!before) {
+      return {
+        ok: false,
+        error: 'Encja "' + entityId + '" nie istnieje w HA — wywołaj home_devices i dopasuj po nazwie.'
+      };
+    }
     await ha.callService(domain, service, data);
-    return { ok: true, entity_id: entityId, service };
+    // v4 #11: HA often reports the new state with a LAG (integrations push it a
+    // beat later) — an instant read said "off", Gzowo told Jurek the light didn't
+    // turn on while it visibly did. Poll up to ~2.5s until the state changes.
+    let after = null;
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, i === 0 ? 250 : 550));
+      after = await readEntity(entityId);
+      if (after && after.state !== before.state) break;
+    }
+    return {
+      ok: true,
+      entity_id: entityId,
+      service,
+      previous_state: before.state,
+      verified_state: after ? after.state : 'unknown',
+      changed: Boolean(after && after.state !== before.state),
+      note: (after && after.state === before.state)
+        ? 'Stan w HA się nie zmienił w 2.5s — ale HA bywa opóźnione; jeśli Jurek mówi, że światło się zmieniło, uwierz Jurkowi.'
+        : undefined
+    };
   } catch (err) {
     return { ok: false, error: friendlyErr(err) };
   }
@@ -354,5 +566,8 @@ export async function init() {
   toolRouter.registerWidget('home', homeDef);
   toolRouter.registerTool(showHomeDecl, showHomeHandler);
   toolRouter.registerTool(homeStatusDecl, homeStatusHandler);
+  toolRouter.registerTool(homeDevicesDecl, homeDevicesHandler);
   toolRouter.registerTool(controlHomeDecl, controlHomeHandler);
+  toolRouter.registerTool(controlRoomDecl, controlRoomHandler);
+  toolRouter.registerTool(learnLampDecl, learnLampHandler);
 }

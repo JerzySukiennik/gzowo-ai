@@ -26,7 +26,10 @@ export const CONFIG = {
   gemini: {
     model: 'gemini-3.1-flash-live-preview',        // primary (newer native-audio, free tier)
     modelFallback: 'gemini-2.5-flash-native-audio-latest', // fallback if primary won't open
+    // Voice tuning (Jurek 2026-07-09: lisp + UA accent → forced pl-PL). If Schedar
+    // still sounds off, try: 'Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr'.
     voiceName: 'Schedar',                 // timbre chosen by Jurek
+    languageCode: 'pl-PL',                // force Polish TTS locale
     apiKeyDirect: ''                      // ⚠️ ALWAYS empty — key is in bridge/.env + Worker, NEVER here
   },
 
@@ -46,6 +49,13 @@ export const CONFIG = {
   // Live (deployed 2026-07-09) — enables voice on GitHub Pages (no bridge).
   worker: { url: 'https://gzowo-worker.gzowo.workers.dev' },
 
-  // --- Weather (Open-Meteo, free, no key) — default Warszawa ---
-  weather: { lat: 52.2297, lon: 21.0122, city: 'Warszawa' }
+  // --- Weather (Open-Meteo, free, no key) — DEFAULT Gzowo (działka rodzinna,
+  //     gmina Pokrzywnica, pow. pułtuski). The assistant can switch to any city
+  //     at runtime via show_weather{city} (Open-Meteo geocoding, no key). ---
+  weather: { lat: 52.6154, lon: 21.0888, city: 'Gzowo' },
+
+  // --- Rocket launch site (launch_weather go/no-go). From Jurek's plus code
+  //     H3R9+4F Dzbanice (06-114) — locality point, fine for regional weather.
+  //     Swap lat/lon for the exact pad if needed. ---
+  launchSite: { lat: 52.6056, lon: 21.0768, name: 'Dzbanice' }
 };

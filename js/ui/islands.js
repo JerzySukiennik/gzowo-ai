@@ -49,6 +49,15 @@ function build() {
   voiceReveal.append(voiceBob);
   el.voiceBtn = voiceBtn;
   el.voiceLabel = voiceLabel;
+  el.voiceReveal = voiceReveal;
+
+  // v4 #12: with text INPUT the GŁOS pill is meaningless — hide the whole pill
+  // while mode.input==='text'; it reappears the moment input flips back to voice.
+  const syncVoicePill = (mode) => {
+    voiceReveal.style.display = (mode && mode.input === 'text') ? 'none' : '';
+  };
+  state.subscribe('mode', syncVoicePill);
+  syncVoicePill(state.get('mode'));
 
   // --- (2) TRYBY pill: reveal -> bob(=group) -> button + panel ---
   const modesReveal = h('div', 'island-reveal is-second');

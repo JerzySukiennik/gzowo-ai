@@ -31,6 +31,7 @@ import {
   setDoc,
   collection,
   addDoc,
+  deleteDoc,
   query,
   orderBy,
   limit,
@@ -42,8 +43,8 @@ import {
 // ============================================================================
 
 // Store keys we own: loaded from prefs, applied to state, persisted back.
-// v2 adds 'skills' (array of enabled skill ids).
-const PREF_KEYS = ['theme', 'mode', 'muted', 'wakeEnabled', 'skills'];
+// v2 adds 'skills' (array of enabled skill ids); v4 adds 'dashboardMode' (#18).
+const PREF_KEYS = ['theme', 'mode', 'muted', 'wakeEnabled', 'dashboardMode', 'widgetConfirm', 'skills'];
 
 const PREF_DEBOUNCE_MS = 800;           // per-key debounce for savePref persistence
 const TRANSCRIPT_FLUSH_MS = 5000;       // max time between transcript flushes
@@ -147,6 +148,8 @@ function normalizePrefs(raw) {
     mode: p.mode,
     muted: p.muted,
     wakeEnabled: p.wakeEnabled,
+    dashboardMode: p.dashboardMode,
+    widgetConfirm: p.widgetConfirm,
     skills: Array.isArray(p.skills) ? p.skills : undefined,
     pinned: {
       idle: Array.isArray(pinnedRaw.idle) ? pinnedRaw.idle : [],
@@ -529,5 +532,67 @@ export const memory = {
    */
   getFactsCached() {
     return Array.isArray(_factsCache) ? [..._factsCache] : [];
+  },
+
+  /**
+   * Forget facts matching `queryText` (case-insensitive substring). Updates the
+   * cache + mirror and deletes the matching Firestore docs. Returns removed texts.
+   * @param {string} queryText
+   * @returns {Promise<string[]>}
+   */
+  async forgetFact(queryText) {
+    const q = String(queryText || '').toLowerCase().trim();
+    if (!q) return [];
+    if (!_factsCache) _factsCache = [];
+    const removed = _factsCache.filter((t) => String(t).toLowerCase().includes(q));
+    if (!removed.length) return [];
+    _factsCache = _factsCache.filter((t) => !String(t).toLowerCase().includes(q));
+    if (_username) lsSet(factsMirrorKey(_username), _factsCache);
+
+    if (_db && _username) {
+      try {
+        // No substring queries in Firestore — scan recent facts, delete matches.
+        const snap = await getDocs(query(factsColRef(), orderBy('ts', 'desc'), limit(FACTS_CAP)));
+        const dels = [];
+        snap.forEach((d) => {
+          const t = d.data() && d.data().text;
+          if (typeof t === 'string' && t.toLowerCase().includes(q)) dels.push(deleteDoc(d.ref));
+        });
+        await Promise.all(dels);
+      } catch (err) { warnOffline('forgetFact', err); }
+    }
+    return removed;
+  },
+
+  /**
+   * Search the conversation history for `queryText` (case-insensitive substring).
+   * Cloud: scans the newest `scan` transcripts; local: the mirror. Returns the
+   * matching {role,text,ts} entries (newest first, capped).
+   * @param {string} queryText
+   * @param {number} [max=12]
+   * @returns {Promise<Array<{role:string,text:string,ts:number}>>}
+   */
+  async searchTranscripts(queryText, max = 12) {
+    const q = String(queryText || '').toLowerCase().trim();
+    if (!q) return [];
+    const pick = (rows) => rows
+      .filter((r) => r && typeof r.text === 'string' && r.text.toLowerCase().includes(q))
+      .slice(0, max);
+
+    if (!_db || !_username) {
+      const arr = lsGet(transcriptMirrorKey(_username), []);
+      const rows = (Array.isArray(arr) ? arr : []).slice().reverse();  // newest first
+      return pick(rows);
+    }
+    try {
+      const snap = await getDocs(query(transcriptsColRef(), orderBy('ts', 'desc'), limit(400)));
+      const rows = [];
+      snap.forEach((d) => { const x = d.data(); if (x) rows.push({ role: x.role, text: x.text, ts: x.ts }); });
+      return pick(rows);
+    } catch (err) {
+      warnOffline('searchTranscripts', err);
+      const arr = lsGet(transcriptMirrorKey(_username), []);
+      return pick((Array.isArray(arr) ? arr : []).slice().reverse());
+    }
   }
 };

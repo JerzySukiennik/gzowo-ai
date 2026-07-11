@@ -131,4 +131,94 @@ export async function init() {
       };
     }
   );
+
+  // --- brain_save: capture a note to the vault inbox IMMEDIATELY (v4-f #10) -----
+  toolRouter.registerTool(
+    {
+      name: 'brain_save',
+      description: 'Zapisuje OD RAZU trwałą notatkę do drugiego mózgu Jurka (osobny, datowany plik ' +
+        'w inbox/ — triage rozłoży go później). Użyj, gdy Jurek mówi „zapisz/zanotuj do mózgu: …", ' +
+        '„zapamiętaj pomysł …". W przeciwieństwie do brain_draft NIE wymaga potwierdzenia — pisze ' +
+        'natychmiast. Potwierdź krótko, że zapisałeś (dopiero po ok:true).',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Krótki tytuł notatki, np. „pomysł na dyszę".' },
+          text: { type: 'string', description: 'Treść po polsku, zwięźle, z konkretami.' }
+        },
+        required: ['text']
+      }
+    },
+    async ({ title, text }) => {
+      if (!brainConnector.isActivated()) return notActivated();
+      const clean = String(text || '').trim();
+      if (!clean) return { ok: false, error: 'pusto — nie ma czego zapisać' };
+      const r = await brainFetch('/brain/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, text: clean })
+      });
+      if (!r.ok) return r;
+      bus.emit('toast', { text: '🧠 Zapisano do mózgu: ' + (r.data.savedTo || 'inbox'), kind: 'info' });
+      return { ok: true, savedTo: r.data.savedTo };
+    }
+  );
+
+  // --- brain_search: content search across the vault (v4-f #11) -----------------
+  toolRouter.registerTool(
+    {
+      name: 'brain_search',
+      description: 'Szuka po TREŚCI wszystkich notatek Jurka (nie tylko nazwach) i zwraca pasujące ' +
+        'pliki + fragmenty. Użyj do „co wiem o X?", „co notowałem o …" — szybciej niż brain_index, ' +
+        'gdy szukasz konkretnego pojęcia. Potem możesz brain_read wybrany plik po pełną treść.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'Szukane słowo/fraza.' } },
+        required: ['query']
+      }
+    },
+    async ({ query }) => {
+      if (!brainConnector.isActivated()) return notActivated();
+      const q = String(query || '').trim();
+      if (!q) return { ok: false, error: 'podaj czego szukać' };
+      const r = await brainFetch('/brain/search?q=' + encodeURIComponent(q));
+      if (!r.ok) return r;
+      return { ok: true, count: r.data.count, hits: r.data.hits };
+    }
+  );
+
+  // --- log_flight: one file per flight in Flight-Logs/ (v4-f #14) ----------------
+  toolRouter.registerTool(
+    {
+      name: 'log_flight',
+      description: 'Zapisuje LOG LOTU rakiety jako osobny plik w folderze Flight-Logs w mózgu Jurka. ' +
+        'Użyj, gdy Jurek chce zanotować start („zapisz lot", „log lotu"). Wypytaj krótko o brakujące ' +
+        'pola, ale zapisz nawet niekompletny. Pola: rocket (nazwa), motor (silnik, np. C6-5), apogee ' +
+        '(pułap), site (miejsce), weather (pogoda), outcome (wynik), notes (uwagi).',
+      parameters: {
+        type: 'object',
+        properties: {
+          rocket: { type: 'string', description: 'Nazwa rakiety.' },
+          motor: { type: 'string', description: 'Silnik, np. „C6-5".' },
+          apogee: { type: 'string', description: 'Pułap/apogeum, np. „142 m".' },
+          site: { type: 'string', description: 'Miejsce startu.' },
+          weather: { type: 'string', description: 'Pogoda podczas startu.' },
+          outcome: { type: 'string', description: 'Wynik: udany / recovery / uszkodzenie itp.' },
+          notes: { type: 'string', description: 'Dodatkowe uwagi.' }
+        },
+        required: []
+      }
+    },
+    async (fields) => {
+      if (!brainConnector.isActivated()) return notActivated();
+      const r = await brainFetch('/brain/flightlog', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields || {})
+      });
+      if (!r.ok) return r;
+      bus.emit('toast', { text: '🚀 Log lotu zapisany: ' + (r.data.savedTo || ''), kind: 'info' });
+      return { ok: true, savedTo: r.data.savedTo };
+    }
+  );
 }

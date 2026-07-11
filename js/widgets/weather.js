@@ -92,8 +92,22 @@ function shortDay(isoDate) {
   return PL_DAYS_SHORT[d.getDay()] || '—';
 }
 
+// ---- Location (mutable — the assistant can switch cities) --------------------
+// Default = Gzowo (config). show_weather{city} geocodes any place via Open-Meteo
+// (free, no key) and re-renders in place. The header title follows loc.city.
+const DEFAULT_LOC = {
+  lat: Number((CONFIG.weather && CONFIG.weather.lat) ?? 52.6154),
+  lon: Number((CONFIG.weather && CONFIG.weather.lon) ?? 21.0888),
+  city: (CONFIG.weather && CONFIG.weather.city) || 'Gzowo'
+};
+let loc = { ...DEFAULT_LOC };
+let reloadFn = null;   // the mounted widget's load() — set in render, cleared on cleanup
+
+/** Current location city name (for tool responses / other modules). */
+export function getWeatherCity() { return loc.city; }
+
 function apiURL() {
-  const { lat, lon } = CONFIG.weather;
+  const { lat, lon } = loc;
   return 'https://api.open-meteo.com/v1/forecast' +
     `?latitude=${lat}&longitude=${lon}` +
     '&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m' +
@@ -101,8 +115,74 @@ function apiURL() {
     '&timezone=auto&forecast_days=4';
 }
 
+// Resolve a place name -> {lat, lon, city}. Open-Meteo geocoding (free, no key).
+// Prefers a Polish match, then the most-populated result, else the first.
+async function geocodeCity(name) {
+  const q = String(name || '').trim();
+  if (!q) return null;
+  const url = 'https://geocoding-api.open-meteo.com/v1/search' +
+    '?name=' + encodeURIComponent(q) + '&count=10&language=pl&format=json';
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+    if (!results.length) return null;
+    const pl = results.filter((r) => r.country_code === 'PL');
+    const pool = pl.length ? pl : results;
+    // Prefer the most populated (disambiguates namesakes toward the real town).
+    pool.sort((a, b) => (b.population || 0) - (a.population || 0));
+    const best = pool[0];
+    return { lat: best.latitude, lon: best.longitude, city: best.name };
+  } catch (_e) { return null; }
+}
+
+// Point the mounted header's title at the current city (def title is frozen at
+// build time, so we patch the DOM directly on a city switch).
+function updateHeaderTitle(bodyEl) {
+  try {
+    const t = bodyEl && bodyEl.parentElement && bodyEl.parentElement.querySelector('.widget-title');
+    if (t) t.textContent = 'POGODA · ' + String(loc.city || '').toUpperCase();
+  } catch (_e) { /* header not mounted yet — def title already carries the city */ }
+}
+
+/**
+ * Switch the weather location by place name. Geocodes, updates loc, and (when the
+ * widget is mounted) re-renders in place + patches the header title. Returns an
+ * honest result object for the tool layer.
+ * @param {string} name
+ * @returns {Promise<{ok:boolean, city?:string, error?:string}>}
+ */
+export async function setWeatherCity(name) {
+  const geo = await geocodeCity(name);
+  if (!geo) return { ok: false, error: 'nie znam miejsca „' + String(name || '').trim() + '"' };
+  loc = geo;
+  if (lastBodyEl && lastBodyEl.isConnected) {
+    updateHeaderTitle(lastBodyEl);
+    renderLoading(lastBodyEl);
+    if (reloadFn) reloadFn();
+  }
+  return { ok: true, city: loc.city };
+}
+
 // ---- Render states ----------------------------------------------------------
+// v4 #13: display variant — the assistant can strip the widget down to one
+// aspect ("pokaż tylko wiatr"). 'full' = everything (the old view).
+export const WEATHER_VARIANTS = ['full', 'wind', 'temp', 'forecast'];
+let variant = 'full';
+let lastBodyEl = null;   // mounted body (null when unmounted)
+let lastData = null;     // last successful API payload
+
+/** Switch the weather view; re-renders in place when mounted + data cached. */
+export function setWeatherVariant(v) {
+  if (!WEATHER_VARIANTS.includes(v)) return false;
+  variant = v;
+  if (lastBodyEl && lastBodyEl.isConnected && lastData) renderData(lastBodyEl, lastData);
+  return true;
+}
+
 function renderData(bodyEl, data) {
+  updateHeaderTitle(bodyEl);   // keep the header in sync with the current city
   const cur = data.current || {};
   const daily = data.daily || {};
   const code = Math.round(cur.weather_code ?? 3);
@@ -126,22 +206,45 @@ function renderData(bodyEl, data) {
       '</div>';
   }
 
-  bodyEl.innerHTML =
-    '<div class="wx">' +
-      '<div class="wx-now">' +
-        `<div class="wx-icon">${iconSVG(wmoGroup(code))}</div>` +
-        '<div class="wx-now-main">' +
-          `<div class="wx-temp">${temp}<span class="wx-deg">&deg;</span></div>` +
-          `<div class="wx-cond">${wmoText(code)}</div>` +
-          `<div class="wx-feels">odczuwalna ${feels}&deg;</div>` +
-        '</div>' +
+  const now =
+    '<div class="wx-now">' +
+      `<div class="wx-icon">${iconSVG(wmoGroup(code))}</div>` +
+      '<div class="wx-now-main">' +
+        `<div class="wx-temp">${temp}<span class="wx-deg">&deg;</span></div>` +
+        `<div class="wx-cond">${wmoText(code)}</div>` +
+        `<div class="wx-feels">odczuwalna ${feels}&deg;</div>` +
       '</div>' +
-      '<div class="wx-meta">' +
-        `<span class="wx-meta-item">wiatr <b>${wind}</b> km/h</span>` +
-        `<span class="wx-meta-item">wilg. <b>${hum}</b>%</span>` +
-      '</div>' +
-      `<div class="wx-strip">${strip}</div>` +
     '</div>';
+  const meta =
+    '<div class="wx-meta">' +
+      `<span class="wx-meta-item">wiatr <b>${wind}</b> km/h</span>` +
+      `<span class="wx-meta-item">wilg. <b>${hum}</b>%</span>` +
+    '</div>';
+
+  let inner, compact = false;
+  if (variant === 'wind') {
+    compact = true;
+    inner =
+      '<div class="wx-big">' +
+        `<div class="wx-big-val">${wind}<span class="wx-big-unit">km/h</span></div>` +
+        '<div class="wx-big-label">wiatr</div>' +
+        `<div class="wx-big-sub">wilgotność ${hum}%</div>` +
+      '</div>';
+  } else if (variant === 'temp') {
+    compact = true;
+    inner =
+      '<div class="wx-big">' +
+        `<div class="wx-icon wx-big-icon">${iconSVG(wmoGroup(code))}</div>` +
+        `<div class="wx-big-val">${temp}<span class="wx-big-unit">&deg;</span></div>` +
+        `<div class="wx-big-label">${wmoText(code)}</div>` +
+        `<div class="wx-big-sub">odczuwalna ${feels}&deg;</div>` +
+      '</div>';
+  } else if (variant === 'forecast') {
+    inner = `<div class="wx-strip wx-strip-only">${strip}</div>`;
+  } else {
+    inner = now + meta + `<div class="wx-strip">${strip}</div>`;
+  }
+  bodyEl.innerHTML = '<div class="wx' + (compact ? ' wx--compact' : '') + '">' + inner + '</div>';
 }
 
 function renderError(bodyEl) {
@@ -159,7 +262,7 @@ function renderLoading(bodyEl) {
 
 // ---- Widget definition factory ---------------------------------------------
 export function weatherDef() {
-  const city = (CONFIG.weather.city || '').toUpperCase();
+  const city = (loc.city || '').toUpperCase();
   return defineWidget({
     id: 'weather',
     title: 'POGODA · ' + city,
@@ -170,6 +273,8 @@ export function weatherDef() {
       let refreshTimer = null;
       let retryTimer = null;
 
+      lastBodyEl = bodyEl;   // variant switcher can re-render in place (v4 #13)
+
       async function load() {
         if (!alive) return;
         try {
@@ -177,6 +282,7 @@ export function weatherDef() {
           if (!res.ok) throw new Error('http ' + res.status);
           const data = await res.json();
           if (!alive) return;
+          lastData = data;
           renderData(bodyEl, data);
           // Success: (re)arm the 15-min live refresh, drop any pending retry.
           if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
@@ -191,12 +297,15 @@ export function weatherDef() {
         }
       }
 
+      reloadFn = load;   // setWeatherCity() re-triggers a fetch on the live widget
       renderLoading(bodyEl);
       load();
 
       // cleanup: kill every timer so a removed widget never ticks (60fps hygiene).
       return () => {
         alive = false;
+        if (lastBodyEl === bodyEl) lastBodyEl = null;
+        if (reloadFn === load) reloadFn = null;
         if (refreshTimer) clearInterval(refreshTimer);
         if (retryTimer) clearTimeout(retryTimer);
       };

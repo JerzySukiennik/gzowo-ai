@@ -133,7 +133,13 @@ function build() {
   // 1. MOTYW ----------------------------------------------------------------
   const themeSec = section('MOTYW');
   themeSeg = segmented(
-    [{ label: 'MONO', value: 'mono' }, { label: 'BLUEPRINT', value: 'blueprint' }],
+    [
+      { label: 'MONO', value: 'mono' }, { label: 'BLUEPRINT', value: 'blueprint' },
+      { label: 'NATURA', value: 'nature' }, { label: 'WATER', value: 'water' },
+      { label: 'INVERTED', value: 'inverted' }, { label: 'GSP', value: 'gsp' },
+      { label: 'NEW YEAR', value: 'newyear' }, { label: 'gOS', value: 'gos' },
+      { label: 'UI/UX', value: 'ui-ux' }
+    ],
     (v) => state.set('theme', v),
     'Motyw'
   );
@@ -161,10 +167,38 @@ function build() {
   statusEl.setAttribute('aria-live', 'polite');
   wakeSec.append(wakeSeg.el, statusEl);
 
-  // 4. CONNECTORY — "Jurek's 2nd Brain" (read + drafty; activated by LAN pass) --
+  // 4. TRYB DASHBOARD (v4 #18) — wake session ends after one exchange ---------
+  const dashSec = section('TRYB DASHBOARD');
+  const dashSeg = segmented(
+    [{ label: 'WŁĄCZONY', value: true }, { label: 'WYŁĄCZONY', value: false }],
+    (v) => state.set('dashboardMode', v),
+    'Tryb dashboard'
+  );
+  const dashHint = document.createElement('div');
+  dashHint.className = 'settings-status';
+  dashHint.textContent = 'Po „Hej Gzowo”: jedna wymiana i głos się wyłącza — czeka na kolejne wywołanie. Przycisk GŁOS działa normalnie.';
+  dashSec.append(dashSeg.el, dashHint);
+  state.subscribe('dashboardMode', (v) => dashSeg.setActive(v));
+  dashSeg.setActive(state.get('dashboardMode'));
+
+  // 4b. WIDGETY — potwierdzanie budowy widgetów (v4-g). OFF = instaluj bez okna.
+  const wgtSec = section('WIDGETY');
+  const wgtSeg = segmented(
+    [{ label: 'POTWIERDZAJ', value: true }, { label: 'BEZ PYTANIA', value: false }],
+    (v) => state.set('widgetConfirm', v),
+    'Potwierdzanie budowy widgetów'
+  );
+  const wgtHint = document.createElement('div');
+  wgtHint.className = 'settings-status';
+  wgtHint.textContent = 'Gdy Gzowo zbuduje widget: „Potwierdzaj” pokazuje podgląd kodu do zatwierdzenia; „Bez pytania” instaluje od razu (kod i tak działa w izolowanym sandboxie).';
+  wgtSec.append(wgtSeg.el, wgtHint);
+  state.subscribe('widgetConfirm', (v) => wgtSeg.setActive(v));
+  wgtSeg.setActive(state.get('widgetConfirm'));
+
+  // 5. CONNECTORY — "Jurek's 2nd Brain" (read + drafty; activated by LAN pass) --
   const connSec = buildConnectors();
 
-  // 5. KONTO ----------------------------------------------------------------
+  // 6. KONTO ----------------------------------------------------------------
   const accSec = section('KONTO');
   const accRow = document.createElement('div');
   accRow.className = 'settings-account';
@@ -178,7 +212,7 @@ function build() {
   accRow.append(userEl, logoutBtn);
   accSec.appendChild(accRow);
 
-  card.append(head, themeSec, soundSec, wakeSec, connSec, accSec);
+  card.append(head, themeSec, soundSec, wakeSec, dashSec, wgtSec, connSec, accSec);
   backdrop.appendChild(card);
   root.appendChild(backdrop);
 
@@ -194,6 +228,7 @@ function build() {
   state.subscribe('muted', (v) => soundSeg.setActive(v));
   state.subscribe('wakeEnabled', (v) => wakeSeg.setActive(v));
   state.subscribe('wakeModelStatus', renderWakeStatus);
+  state.subscribe('wakeLastHeard', renderWakeStatus);
   state.subscribe('wakeAvailable', renderWakeDim);
   state.subscribe('user', renderUser);
 
@@ -300,7 +335,13 @@ function renderConnectors() {
 // ---- Renderers -------------------------------------------------------------
 function renderWakeStatus() {
   if (!statusEl) return;
-  statusEl.textContent = WAKE_STATUS_TEXT[state.get('wakeModelStatus')] || WAKE_STATUS_TEXT.idle;
+  let txt = WAKE_STATUS_TEXT[state.get('wakeModelStatus')] || WAKE_STATUS_TEXT.idle;
+  // v4 #19: live "what did it hear" line — wake debugging without the console.
+  const heard = state.get('wakeLastHeard');
+  if (heard && state.get('wakeModelStatus') === 'ready') {
+    txt += ' · ostatnio usłyszałem: „' + heard + '"';
+  }
+  statusEl.textContent = txt;
 }
 
 function renderWakeDim() {

@@ -23,7 +23,10 @@
   --glass-bg-active: rgba(255,255,255,0.13);
   --glass-border: rgba(255,255,255,0.16);
   --glass-border-bright: rgba(255,255,255,0.30);
-  --glass-highlight: linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0) 55%);
+  /* No sheen at all (Jurek 2026-07-09): the liquid-glass refraction IS the effect;
+     the old white->transparent gradient read as a gray/white block on the glass
+     (chat, auth card, …). Kept as a token = `none` so nothing paints. */
+  --glass-highlight: none;
   --glass-blur: 22px;
   --glass-shadow: 0 10px 40px rgba(0,0,0,0.60);
   --glass-radius: 28px;      /* pill/card radius */
@@ -76,6 +79,111 @@
   --grid-line: rgba(255,255,255,0.09);
   --grid-size: 40px;
   --line: #222222; --line-strong: #2e2e2e;
+}
+
+/* =====================================================================
+   v3 #15 — THEME PACK. Each theme restyles the WHOLE UI (palette, fonts,
+   shapes/radii, glass tint, grid) — the avatar is intentionally untouched
+   (Jurek). Colours are allowed here (SPEC v2: "motywy także z kolorami").
+   The 5 dark themes keep the white avatar readable; "inverted" is the one
+   light theme and gets a dark radial pool behind the orb (themes.css).
+   All fonts are SYSTEM stacks — zero external fetch, works on Pages too.
+   ===================================================================== */
+
+/* --- Natura: deep forest, warm serif, organic soft corners --- */
+[data-theme="nature"] {
+  --bg:#040a06; --bg-raised:#081410; --fg:#eaf4ea; --fg-dim:#9db8a4; --fg-faint:#546b59;
+  --line:#12291c; --line-strong:#1c3a29; --line-bright:#2f5b40;
+  --grid-line:rgba(120,220,150,0.05); --grid-size:64px;
+  --scrim:rgba(3,10,6,0.82);
+  --glass-bg:rgba(120,220,150,0.07); --glass-bg-active:rgba(120,220,150,0.14);
+  --glass-border:rgba(150,235,170,0.18); --glass-border-bright:rgba(150,235,170,0.34);
+  --glass-shadow:0 12px 42px rgba(0,20,8,0.55);
+  --glass-radius:26px; --glass-radius-sm:16px; --widget-radius:14px;
+  --font-text:'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif;
+  --glow-soft:0 0 24px rgba(120,220,150,0.20);
+}
+/* --- Water: deep ocean, cool humanist sans, fluid rounded --- */
+[data-theme="water"] {
+  --bg:#00060e; --bg-raised:#04101f; --fg:#e2f2ff; --fg-dim:#8fb4d0; --fg-faint:#4a6579;
+  --line:#0b2135; --line-strong:#123048; --line-bright:#1f4d6f;
+  --grid-line:rgba(90,190,255,0.06); --grid-size:60px;
+  --scrim:rgba(0,6,14,0.82);
+  --glass-bg:rgba(90,190,255,0.08); --glass-bg-active:rgba(90,190,255,0.16);
+  --glass-border:rgba(120,205,255,0.20); --glass-border-bright:rgba(120,205,255,0.36);
+  --glass-shadow:0 14px 46px rgba(0,20,40,0.6);
+  --glass-radius:30px; --glass-radius-sm:18px; --widget-radius:18px;
+  --font-text:'Avenir Next','Segoe UI',system-ui,-apple-system,sans-serif;
+  --glow-soft:0 0 26px rgba(90,190,255,0.22);
+}
+/* --- Inverted: light theme, black on white (the only bright one) --- */
+[data-theme="inverted"] {
+  --bg:#f4f4f5; --bg-raised:#ffffff; --fg:#0a0a0a; --fg-dim:#555555; --fg-faint:#9a9a9a;
+  --line:#e2e2e4; --line-strong:#d2d2d6; --line-bright:#b4b4ba;
+  --grid-line:rgba(0,0,0,0.05); --grid-size:56px;
+  --scrim:rgba(240,240,242,0.78);
+  --glass-bg:rgba(0,0,0,0.05); --glass-bg-active:rgba(0,0,0,0.10);
+  --glass-border:rgba(0,0,0,0.14); --glass-border-bright:rgba(0,0,0,0.28);
+  --glass-shadow:0 10px 40px rgba(0,0,0,0.14);
+  --glow-soft:0 0 24px rgba(0,0,0,0.14); --glow-strong:0 0 48px rgba(0,0,0,0.28);
+}
+/* --- GSP: brutalist black+white, sharp corners, dense mono grid --- */
+[data-theme="gsp"] {
+  --bg:#000000; --bg-raised:#0a0a0a; --fg:#ffffff; --fg-dim:#b0b0b0; --fg-faint:#666666;
+  --line:#222222; --line-strong:#333333; --line-bright:#4a4a4a;
+  --grid-line:rgba(255,255,255,0.07); --grid-size:40px;
+  --glass-bg:rgba(255,255,255,0.05); --glass-border:rgba(255,255,255,0.22);
+  --glass-border-bright:rgba(255,255,255,0.4);
+  --glass-radius:2px; --glass-radius-sm:2px; --widget-radius:0px;
+  --font-text:'Bebas Neue','Oswald','Arial Narrow',var(--font-mono);
+  --tracking:0.1em; --tracking-wide:0.28em;
+}
+/* --- New Year: midnight navy + champagne gold, elegant serif --- */
+[data-theme="newyear"] {
+  --bg:#070b1a; --bg-raised:#0d1430; --fg:#f6efd8; --fg-dim:#c7b98a; --fg-faint:#6d6647;
+  --line:#1a2145; --line-strong:#262f5c; --line-bright:#3a457e;
+  --grid-line:rgba(214,183,105,0.07); --grid-size:52px;
+  --scrim:rgba(7,11,26,0.84);
+  --glass-bg:rgba(214,183,105,0.08); --glass-bg-active:rgba(214,183,105,0.15);
+  --glass-border:rgba(224,196,120,0.24); --glass-border-bright:rgba(224,196,120,0.44);
+  --glass-shadow:0 14px 48px rgba(0,0,20,0.6);
+  --glass-radius:22px; --glass-radius-sm:14px; --widget-radius:10px;
+  --font-text:'Didot','Bodoni MT','Playfair Display',Georgia,serif;
+  --glow-soft:0 0 28px rgba(224,196,120,0.28);
+}
+/* --- UI/UX (v3 #18, autorski redesign — "Ink & Paper"): ciepły papier, atrament,
+   międzynarodowy pomarańcz jako JEDYNY akcent, Futura/Avenir, twarde offsetowe
+   cienie zamiast glass. WSZYSTKIE przeróbki żyją wyłącznie pod tym motywem. --- */
+[data-theme="ui-ux"] {
+  --bg:#f2ede2; --bg-raised:#faf7f0; --fg:#171410; --fg-dim:#5d5748; --fg-faint:#a59c86;
+  --line:#ddd5c2; --line-strong:#c9c0a9; --line-bright:#8f866d;
+  --grid-line:rgba(23,20,16,0.07); --grid-size:48px;
+  --scrim:rgba(238,232,220,0.85);
+  --uiux-accent:#ff4a00;               /* international orange — the ONE accent */
+  --uiux-ink:#171410;
+  --uiux-shadow:6px 6px 0 rgba(23,20,16,0.12);   /* hard print-offset shadow */
+  --glass-bg:#faf7f0;                  /* paper cards — glass is OFF here */
+  --glass-bg-active:#f3eee1;
+  --glass-border:rgba(23,20,16,0.75);
+  --glass-border-bright:#171410;
+  --glass-blur:0px;
+  --glass-shadow:var(--uiux-shadow);
+  --glass-radius:14px; --glass-radius-sm:10px; --widget-radius:10px;
+  --font-text:'Futura','Avenir Next','Century Gothic','Trebuchet MS',sans-serif;
+  --glow-soft:none; --glow-strong:none;
+}
+
+/* --- gOS: Apple-style, soft light-on-dark, SF font, very rounded --- */
+[data-theme="gos"] {
+  --bg:#1c1c1e; --bg-raised:#2c2c2e; --fg:#f5f5f7; --fg-dim:#a1a1a6; --fg-faint:#6e6e73;
+  --line:#3a3a3c; --line-strong:#48484a; --line-bright:#636366;
+  --grid-line:rgba(255,255,255,0.03); --grid-size:64px;
+  --scrim:rgba(0,0,0,0.5);
+  --glass-bg:rgba(255,255,255,0.10); --glass-bg-active:rgba(255,255,255,0.18);
+  --glass-border:rgba(255,255,255,0.18); --glass-border-bright:rgba(255,255,255,0.32);
+  --glass-blur:30px; --glass-shadow:0 12px 40px rgba(0,0,0,0.5);
+  --glass-radius:34px; --glass-radius-sm:20px; --widget-radius:20px;
+  --font-text:-apple-system,'SF Pro Text','SF Pro Display','Helvetica Neue',system-ui,sans-serif;
 }
 
 @media (max-width: 720px) {

@@ -123,6 +123,71 @@
    drafting crosshair at screen center, layered UNDER the existing grid image.
    Static background gradients only, so no repaint cost.
    ------------------------------------------------------------------------- */
+/* =====================================================================
+   v3 #15 theme flourishes — the avatar stays WHITE across all themes, so
+   "inverted" (the one light theme) paints a soft dark pool at screen-center
+   behind the orb so it still reads. Cheap: one static radial in #grid-bg.
+   ===================================================================== */
+[data-theme='inverted'] #grid-bg {
+  background-image:
+    radial-gradient(circle at center, rgba(10,10,12,0.92) 0, rgba(10,10,12,0.55) 16%, transparent 34%),
+    repeating-linear-gradient(to right,  var(--grid-line) 0, var(--grid-line) 1px, transparent 1px, transparent var(--grid-size)),
+    repeating-linear-gradient(to bottom, var(--grid-line) 0, var(--grid-line) 1px, transparent 1px, transparent var(--grid-size));
+  background-position: center center;
+}
+/* Per-theme widget body accents so the "color inside widgets" law stays on-theme. */
+[data-theme='nature']  .widget-body { --wx-accent:#57d977; --tmr-accent:#9be36b; }
+[data-theme='water']   .widget-body { --wx-accent:#38bdf8; --tmr-accent:#7dd3fc; }
+[data-theme='newyear'] .widget-body { --wx-accent:#e0c478; --tmr-accent:#f0d79a; }
+[data-theme='inverted'].widget-body,
+[data-theme='inverted'] .widget-body { --wx-accent:#2f6ad9; --tmr-accent:#c8860a; }
+[data-theme='gos']     .widget-body { --wx-accent:#0a84ff; --tmr-accent:#ffd60a; }
+/* GSP: sharp, monochrome — kill the widget radius entirely + hard rims. */
+[data-theme='gsp'] .widget { border-width:1px; }
+
+/* =====================================================================
+   Theme SCENERY (v3 #15b) — each theme is a whole SCENE, not just a palette.
+   Particles are drawn on #scene-canvas (js/ui/theme-scene.js). The pieces below
+   are the CHEAP static/CSS-animated parts: base ambience gradients + gOS blobs.
+   ===================================================================== */
+/* Ambience wash per theme (sits under the particles). */
+[data-theme='nature']  #theme-scene { background:
+  radial-gradient(120% 80% at 50% 120%, rgba(20,60,30,0.55), transparent 60%),
+  radial-gradient(80% 50% at 50% -10%, rgba(30,80,45,0.25), transparent 70%); }
+[data-theme='water']   #theme-scene { background:
+  linear-gradient(to bottom, rgba(0,20,45,0.0), rgba(0,25,55,0.55) 70%, rgba(0,35,70,0.8)); }
+[data-theme='gsp']     #theme-scene { background:
+  radial-gradient(70% 55% at 30% 25%, rgba(40,30,90,0.35), transparent 60%),
+  radial-gradient(60% 50% at 80% 75%, rgba(90,25,70,0.28), transparent 65%); }
+[data-theme='newyear'] #theme-scene { background:
+  radial-gradient(90% 60% at 50% 120%, rgba(40,40,120,0.35), transparent 60%); }
+[data-theme='inverted'] #theme-scene { background:
+  radial-gradient(60% 60% at 50% 45%, rgba(0,0,0,0.05), transparent 70%); }
+
+/* gOS — three big soft blurred colour blobs slowly drifting (Big Sur vibe).
+   Pure CSS, transform-only animation → smooth + cheap. */
+[data-theme='gos'] #theme-scene::before,
+[data-theme='gos'] #theme-scene::after {
+  content:''; position:absolute; border-radius:50%;
+  filter: blur(80px); opacity:0.5; pointer-events:none;
+}
+[data-theme='gos'] #theme-scene::before {
+  width:52vw; height:52vw; left:-8vw; top:-10vw;
+  background: radial-gradient(circle, #0a84ff, transparent 65%);
+  animation: gos-blob-a 26s var(--ease-in-out) infinite alternate;
+}
+[data-theme='gos'] #theme-scene::after {
+  width:46vw; height:46vw; right:-6vw; bottom:-12vw;
+  background: radial-gradient(circle, #bf5af2, transparent 65%);
+  animation: gos-blob-b 32s var(--ease-in-out) infinite alternate;
+}
+@keyframes gos-blob-a { from{ transform:translate(0,0) scale(1);} to{ transform:translate(18vw,12vh) scale(1.2);} }
+@keyframes gos-blob-b { from{ transform:translate(0,0) scale(1);} to{ transform:translate(-16vw,-10vh) scale(1.15);} }
+@media (prefers-reduced-motion: reduce) {
+  [data-theme='gos'] #theme-scene::before,
+  [data-theme='gos'] #theme-scene::after { animation: none; }
+}
+
 [data-theme='blueprint'] #grid-bg {
   background-image:
     /* center crosshair: one vertical + one horizontal faint band */

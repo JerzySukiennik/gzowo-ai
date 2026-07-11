@@ -105,11 +105,14 @@
 /* ---- Segmented control: active option inverted (white-on-black) --------- */
 .seg {
   display: flex;
+  flex-wrap: wrap;            /* theme list has 8 options → wrap to rows */
   width: 100%;
   border: 1px solid var(--line-strong);
   border-radius: var(--glass-radius-sm);
   overflow: hidden;
 }
+/* When wrapped, give options a sane min width so rows stay readable. */
+.seg .seg-opt { min-width: 33%; }
 .seg-opt {
   flex: 1 1 0;
   appearance: none;

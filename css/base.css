@@ -39,6 +39,27 @@ html, body {
   background-position: center center;
 }
 
+/* ---- Theme scenery layer (z:1) — above the grid, behind the avatar. Holds the
+   per-theme animated backdrop (particles on #scene-canvas + static CSS decor).
+   Never eats pointer events; hidden entirely for mono/blueprint (clean default). ---- */
+#theme-scene {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: hidden;
+}
+#scene-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+/* No scenery on the two monochrome defaults. */
+[data-theme="mono"] #theme-scene,
+[data-theme="blueprint"] #theme-scene { display: none; }
+
 /* ---- Avatar canvas (z:10) — fullscreen 2D canvas, never eats pointer events ---- */
 #avatar-canvas {
   position: fixed;

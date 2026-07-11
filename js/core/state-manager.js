@@ -36,7 +36,10 @@ const STORE_DEFAULTS = {
   theme: 'mono',                                  // 'mono' | 'blueprint'
   mode: { input: 'voice', output: 'voice' },      // conversation mode matrix
   muted: false,
-  wakeEnabled: false,                             // user preference for 'hej gzowo'
+  wakeEnabled: true,                              // v4 #5: 'hej gzowo' listening ON by default
+  dashboardMode: false,                           // v4 #18: wake session ends after one exchange
+  widgetConfirm: true,                            // v4-g: confirm dialog before installing a built widget
+  skillMode: null,                                // v4 #21: active text-skill mode {name,instructions}|null
   wakeAvailable: false,                           // wake stack actually reachable
   wakeModelStatus: 'idle',                        // 'idle' | 'loading' | 'ready' | 'unavailable'
   user: null,                                     // {username} after auth

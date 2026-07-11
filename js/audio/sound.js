@@ -43,9 +43,15 @@ const SOURCES = {
     'https://assets.mixkit.co/active_storage/sfx/1113/1113.wav',
     'https://assets.mixkit.co/active_storage/sfx/2574/2574.wav'
   ],
+  // "Move to trash" = a REAL paper-crumple (Jurek 2026-07-09). The old first
+  // candidate (mixkit 2569) was an electronic zap → read as "synthetic". These are
+  // vendored locally (assets/audio/, mixkit PAPER category, ~0.8s / ~0.45s crumples)
+  // so they load same-origin — reliable on the bridge AND on Pages — with the remote
+  // mixkit paper sound as a last resort. Swap the file to taste; the name stays.
   trash: [
-    'https://assets.mixkit.co/active_storage/sfx/2569/2569.wav',
-    'https://assets.mixkit.co/active_storage/sfx/1101/1101.wav'
+    'assets/audio/trash-crumple.wav',
+    'assets/audio/trash-crumple-quick.wav',
+    'https://assets.mixkit.co/active_storage/sfx/1105/1105.wav'
   ],
   'timer-done': [
     'https://assets.mixkit.co/active_storage/sfx/1005/1005.wav',
@@ -371,7 +377,12 @@ function stopHum() {
 }
 
 // Decide whether the hum should be running for a given UI state.
+// v4 #17 (2026-07-10): Jurek — „coś bez przerwy szumi". The ambient idle drone
+// IS that hum, so it is now permanently OFF. Kept as code (not deleted) in case
+// it ever returns as an opt-in setting; the guard below makes it a no-op.
+const HUM_ENABLED = false;
 function maybeStartHum(ui) {
+  if (!HUM_ENABLED) { stopHum(); return; }
   if (state.get('muted')) { stopHum(); return; }
   if (ui === 'idle' || ui === 'talking') {
     if (!ctx) return; // no context yet -> next gesture-driven check starts it

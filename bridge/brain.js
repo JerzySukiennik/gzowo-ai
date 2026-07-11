@@ -5,10 +5,11 @@
 
 import { homedir } from 'node:os';
 import { existsSync, statSync } from 'node:fs';
-import { readFile, appendFile, readdir } from 'node:fs/promises';
+import { readFile, appendFile, readdir, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, join, relative, extname, sep } from 'node:path';
 
 const DRAFTS_REL = 'inbox/gzowoai-drafts.md';
+const FLIGHTLOG_DIR = 'Flight-Logs';
 
 // Read env at CALL time — the bridge's loadEnv() runs AFTER this module is
 // imported, so reading process.env at module-load would see empty values.
@@ -75,4 +76,83 @@ export async function brainAppendDraft(topic, text) {
   const entry = `\n## [${stamp}] ${t}\n${body}\n`;
   await appendFile(join(vault(), DRAFTS_REL), entry, 'utf8');
   return { ok: true, appendedTo: DRAFTS_REL };
+}
+
+// ---------------------------------------------------------------------------
+// Write helpers (v4-f). Paths are built HERE (never from raw client input) and
+// sanitized to a slug, so there is no traversal surface. All stay inside vault().
+// ---------------------------------------------------------------------------
+function slugify(s, fallback) {
+  const out = String(s || '').toLowerCase().trim()
+    .replace(/[ąćęłńóśźż]/g, (c) => ({ ą: 'a', ć: 'c', ę: 'e', ł: 'l', ń: 'n', ó: 'o', ś: 's', ź: 'z', ż: 'z' }[c] || c))
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+  return out || fallback;
+}
+function dateStamp(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Save a real, dated note file into inbox/ (vault convention), never overwriting. */
+export async function brainSaveNote(title, text) {
+  const now = new Date();
+  const day = dateStamp(now);
+  const t = String(title || '').trim() || 'notatka';
+  const base = day + '-' + slugify(t, 'notatka');
+  const V = vault();
+  let rel = 'inbox/' + base + '.md';
+  let n = 2;
+  while (existsSync(join(V, rel))) { rel = 'inbox/' + base + '-' + n + '.md'; n++; }
+  const front = `---\ntype: note\nsource: session\ncreated: ${day}\n---\n\n`;
+  const body = `# ${t}\n\n${String(text || '').trim()}\n`;
+  await mkdir(join(V, 'inbox'), { recursive: true });
+  await writeFile(join(V, rel), front + body, 'utf8');
+  return { ok: true, savedTo: rel };
+}
+
+/** Append a flight log as its OWN file in Flight-Logs/ (one file per flight). */
+export async function brainFlightLog(fields) {
+  const f = fields && typeof fields === 'object' ? fields : {};
+  const now = new Date();
+  const day = dateStamp(now);
+  const name = String(f.name || f.rocket || '').trim();
+  const base = day + (name ? '-' + slugify(name, 'lot') : '-lot');
+  const V = vault();
+  await mkdir(join(V, FLIGHTLOG_DIR), { recursive: true });
+  let rel = FLIGHTLOG_DIR + '/' + base + '.md';
+  let n = 2;
+  while (existsSync(join(V, rel))) { rel = FLIGHTLOG_DIR + '/' + base + '-' + n + '.md'; n++; }
+  const rows = [];
+  const add = (k, v) => { if (v != null && String(v).trim() !== '') rows.push(`- **${k}:** ${String(v).trim()}`); };
+  add('Data', f.date || day);
+  add('Rakieta', f.rocket || f.name);
+  add('Silnik', f.motor);
+  add('Apogeum', f.apogee);
+  add('Miejsce', f.site);
+  add('Pogoda', f.weather);
+  add('Wynik', f.outcome);
+  const notes = String(f.notes || '').trim();
+  const front = `---\ntype: flight-log\ncreated: ${day}\n---\n\n`;
+  const body = `# Lot — ${name || day}\n\n${rows.join('\n')}\n${notes ? '\n## Notatki\n' + notes + '\n' : ''}`;
+  await writeFile(join(V, rel), front + body, 'utf8');
+  return { ok: true, savedTo: rel };
+}
+
+/** Grep the vault for a query across all .md; return matching files + snippets. */
+export async function brainSearch(query) {
+  const q = String(query || '').toLowerCase().trim();
+  if (!q) return { ok: false, error: 'empty query' };
+  const { files } = await brainIndex();
+  const hits = [];
+  for (const f of files) {
+    let content;
+    try { content = await readFile(join(vault(), f.path), 'utf8'); } catch { continue; }
+    const idx = content.toLowerCase().indexOf(q);
+    if (idx === -1) continue;
+    const start = Math.max(0, idx - 60);
+    const snippet = content.slice(start, idx + q.length + 120).replace(/\s+/g, ' ').trim();
+    hits.push({ path: f.path, snippet });
+    if (hits.length >= 12) break;
+  }
+  return { ok: true, count: hits.length, hits };
 }

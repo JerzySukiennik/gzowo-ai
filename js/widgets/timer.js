@@ -60,8 +60,11 @@ function swElapsedMs() {
 
 function fmtClock(ms) {
   const total = Math.ceil(ms / 1000);
-  const m = Math.floor(total / 60);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
+  // v4 #7: hour-long timers read as H:MM:SS; below an hour stays MM:SS.
+  if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
   return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
 
@@ -76,6 +79,7 @@ function fmtStopwatch(ms) {
 
 // ---- Countdown control (used by tool router + UI buttons) -------------------
 function timerStart(seconds, label) {
+  dismissAlarm();               // a new countdown always silences a ringing alarm
   model.mode = 'timer';
   if (typeof seconds === 'number' && seconds > 0) {
     model.duration = Math.round(seconds * 1000);
@@ -96,6 +100,7 @@ function timerPause() {
 }
 
 function timerReset() {
+  dismissAlarm();
   model.running = false;
   model.finished = false;
   model.remaining = model.duration;
@@ -123,17 +128,135 @@ function onTimerHitZero() {
   model.running = false;
   model.remaining = 0;
   model.finished = true;
-  // honest, decoupled side effects via the bus
-  bus.emit('sound:play', { name: 'timer-done' });
-  bus.emit('toast', { text: 'Czas minął, człowieku!' });
+  // v4 #5+#6: full-screen alarm with the REAL ringtone (looped) + ODRZUĆ.
+  showAlarmOverlay();
   if (flashDone) flashDone();
   if (repaint) repaint();
+}
+
+// ---- Full-screen alarm (v4 #5+#6) -------------------------------------------
+// When the countdown hits zero the whole screen takes over: big "CZAS MINĄŁ",
+// the timer label, and one ODRZUĆ button. Jurek's Timer.m4r (vendored as
+// assets/audio/timer-alarm.m4a) LOOPS until dismissed; if the audio can't play
+// (no gesture yet / codec) we fall back to the old one-shot cue — honest, and
+// the overlay still shows. ESC dismisses too.
+const ALARM_URL = 'assets/audio/timer-alarm.m4a';
+let alarmEl = null;
+let alarmAudio = null;
+
+function dismissAlarm() {
+  if (alarmAudio) { try { alarmAudio.pause(); alarmAudio.src = ''; } catch (_e) { /* dead */ } alarmAudio = null; }
+  if (alarmEl) { try { alarmEl.remove(); } catch (_e) { /* gone */ } alarmEl = null; }
+  window.removeEventListener('keydown', onAlarmKey, true);
+}
+
+function onAlarmKey(e) {
+  if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); dismissAlarm(); }
+}
+
+function showAlarmOverlay(labelOverride) {
+  dismissAlarm(); // never stack two alarms
+  const shownLabel = (labelOverride != null && String(labelOverride).trim())
+    ? String(labelOverride).trim() : model.label;
+  const wrap = document.createElement('div');
+  wrap.className = 'tmr-alarm';
+  Object.assign(wrap.style, {
+    position: 'fixed', inset: '0', zIndex: '95', display: 'flex',
+    flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+    gap: 'var(--space-5)', background: 'var(--scrim)',
+    backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)'
+  });
+
+  const title = document.createElement('div');
+  title.textContent = 'CZAS MINĄŁ';
+  Object.assign(title.style, {
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xl)',
+    letterSpacing: 'var(--tracking-wide)', color: 'var(--fg)'
+  });
+
+  const sub = document.createElement('div');
+  sub.textContent = shownLabel ? shownLabel : '';
+  Object.assign(sub.style, {
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--text-lg)',
+    letterSpacing: 'var(--tracking)', color: 'var(--fg-dim)'
+  });
+  if (!shownLabel) sub.style.display = 'none';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'ODRZUĆ';
+  Object.assign(btn.style, {
+    appearance: 'none', cursor: 'pointer', background: 'var(--fg)',
+    color: 'var(--bg)', border: '0', borderRadius: 'var(--glass-radius-sm)',
+    fontFamily: 'var(--font-mono)', fontSize: 'var(--text-md)',
+    letterSpacing: 'var(--tracking-wide)', padding: 'var(--space-3) var(--space-7)'
+  });
+  btn.addEventListener('click', dismissAlarm);
+
+  wrap.append(title, sub, btn);
+  document.body.appendChild(wrap);
+  alarmEl = wrap;
+  window.addEventListener('keydown', onAlarmKey, true);
+  try { btn.focus(); } catch (_e) { /* best-effort */ }
+
+  alarmAudio = new Audio(ALARM_URL);
+  alarmAudio.loop = true;                    // rings until ODRZUĆ (v4 #5)
+  alarmAudio.play().catch(() => {
+    bus.emit('sound:play', { name: 'timer-done' });  // honest fallback cue
+  });
+}
+
+// ---- Named concurrent timers (v4-f #6) --------------------------------------
+// Independent of the ring timer above: many can run at once, each keyed by label,
+// each firing its OWN full-screen alarm (reusing showAlarmOverlay). Ephemeral —
+// they live in memory (a page reload clears them), which is fine for kitchen-scale
+// timers ("herbata 3 min", "pizza 12 min").
+const namedTimers = new Map();   // key -> {label, endAt, handle}
+function nkey(label) { return String(label || '').toLowerCase().trim() || ('timer-' + (namedTimers.size + 1)); }
+
+function startNamedTimer(seconds, label) {
+  const sec = Math.round(Number(seconds) || 0);
+  if (!(sec > 0)) return { ok: false, error: 'podaj dodatni czas' };
+  if (sec > 24 * 3600) return { ok: false, error: 'max 24 godziny' };
+  const key = nkey(label);
+  const prev = namedTimers.get(key);
+  if (prev) clearTimeout(prev.handle);
+  const lbl = String(label || '').trim();
+  const handle = setTimeout(() => {
+    namedTimers.delete(key);
+    showAlarmOverlay(lbl || 'Minutnik');
+    bus.emit('toast', { text: '⏰ Minęło: ' + (lbl || 'minutnik'), kind: 'info' });
+  }, sec * 1000);
+  namedTimers.set(key, { label: lbl, endAt: Date.now() + sec * 1000, handle });
+  return { ok: true, label: lbl, seconds: sec };
+}
+function listNamedTimers() {
+  const now = Date.now();
+  return [...namedTimers.values()]
+    .map((t) => ({ label: t.label || '(bez nazwy)', remaining_sec: Math.max(0, Math.round((t.endAt - now) / 1000)) }))
+    .sort((a, b) => a.remaining_sec - b.remaining_sec);
+}
+function cancelNamedTimer(label) {
+  const key = nkey(label);
+  let t = namedTimers.get(key);
+  if (!t) {  // fuzzy: first whose label includes the query
+    const q = String(label || '').toLowerCase().trim();
+    for (const [k, v] of namedTimers) { if ((v.label || '').toLowerCase().includes(q)) { t = v; namedTimers.delete(k); break; } }
+    if (t) { clearTimeout(t.handle); return { ok: true, cancelled: t.label }; }
+    return { ok: false, error: 'nie mam minutnika „' + String(label || '').trim() + '"' };
+  }
+  clearTimeout(t.handle);
+  namedTimers.delete(key);
+  return { ok: true, cancelled: t.label };
 }
 
 // Public handle for the tool router (import { timerControl } from './timer.js').
 export const timerControl = {
   start(seconds, label) { timerStart(seconds, label); },
-  stop() { timerStop(); }
+  stop() { timerStop(); },
+  startNamed(seconds, label) { return startNamedTimer(seconds, label); },
+  listNamed() { return listNamedTimers(); },
+  cancelNamed(label) { return cancelNamedTimer(label); }
 };
 
 // ---- Stopwatch control ------------------------------------------------------

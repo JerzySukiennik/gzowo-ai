@@ -58,10 +58,12 @@ export async function init() {
   loadWake();
 }
 
-/** True only when we may actively hold the mic: from a resting idle. Never in
- *  auth/startup (pre-app), talking (the Live session owns the mic) or showing. */
+/** True when we may actively hold the mic: idle AND showing (widgets on screen
+ *  still deserve "Hej Gzowo" — 2026-07-10 fix: wake "bardzo rzadko działa" was
+ *  partly because showing never listened at all). Never in auth/startup
+ *  (pre-app) or talking (the Live session owns the mic). */
 function canListen() {
-  return state.ui === 'idle';
+  return state.ui === 'idle' || state.ui === 'showing';
 }
 
 async function loadWake() {
@@ -86,7 +88,12 @@ async function loadWake() {
     state.set('wakeModelStatus', 'loading');
     const { createModel } = await import(VOSK_ESM);
     model = await createModel(modelUrl);
-    grammar = JSON.stringify([...keywords, '[unk]']);
+    // NO grammar (2026-07-09 fix): "gzowo" is OUT-OF-VOCABULARY for the Vosk PL
+    // model, and a grammar restricted to OOV phrases can never emit them — the
+    // recognizer stayed silent forever ("Hej Gzowo" dead despite status ready).
+    // Free-form recognition transcribes *something* close, and matches() does the
+    // fuzzy phonetic match. Costs more CPU, but only runs while idle.
+    grammar = null;
 
     // Model is live: expose the capability. Listening stays OFF until the user
     // enables wake in Settings (so we never grab the mic behind their back).
@@ -101,12 +108,12 @@ async function loadWake() {
       catch (err) { console.warn('[wake-word] toggle failed', err); }
     });
 
-    // Release the mic while a voice session is live; re-acquire back at idle.
-    // auth/startup/showing: never actively (re)acquire (canListen() gates that).
+    // Release the mic while a voice session is live; re-acquire back in any
+    // listen-capable state (idle OR showing). auth/startup never (canListen gates).
     bus.on('state:change', async ({ to }) => {
       try {
         if (to === 'talking') await stopListening();
-        else if (to === 'idle' && state.get('wakeEnabled') === true) await startListening();
+        else if ((to === 'idle' || to === 'showing') && state.get('wakeEnabled') === true) await startListening();
       } catch (err) { console.warn('[wake-word] state coordination failed', err); }
     });
   } catch (err) {
@@ -122,14 +129,26 @@ async function startListening() {
   busy = true;
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+      // autoGainControl EXPLICITLY on: quiet/far-field "Hej Gzowo" was often too
+      // soft for the recognizer (part of the "rarely wakes" report, 2026-07-10).
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') { try { await audioCtx.resume(); } catch (_e) { /* ignore */ } }
 
-    recognizer = new model.KaldiRecognizer(audioCtx.sampleRate, grammar);
+    // Free-form recognizer (no grammar — see loadWake). Finals are logged so a
+    // live "why didn't it wake" session can just watch the console.
+    recognizer = grammar
+      ? new model.KaldiRecognizer(audioCtx.sampleRate, grammar)
+      : new model.KaldiRecognizer(audioCtx.sampleRate);
     recognizer.on('result', (msg) => {
       const text = (msg && msg.result && msg.result.text ? msg.result.text : '').toLowerCase();
+      if (text) {
+        console.info('[wake-word] heard:', JSON.stringify(text));
+        // Surfaced in Settings as „ostatnio usłyszałem: …" so Jurek can debug the
+        // wake WITHOUT opening the console (v4 #19).
+        state.set('wakeLastHeard', text.slice(0, 60));
+      }
       if (matches(text)) fireWake();
     });
     recognizer.on('partialresult', (msg) => {
@@ -142,6 +161,8 @@ async function startListening() {
     // a wake listener; the recognizer resamples from the context rate internally.
     procNode = audioCtx.createScriptProcessor(4096, 1, 1);
     procNode.onaudioprocess = (e) => {
+      // Piggyback clap detection on the same mic buffer (v4-b #3) — no 2nd mic.
+      try { detectClap(e.inputBuffer.getChannelData(0)); } catch (_e) { /* transient */ }
       if (!recognizer) return;
       try { recognizer.acceptWaveform(e.inputBuffer); } catch (_e) { /* transient */ }
     };
@@ -173,11 +194,99 @@ async function teardown() {
   procNode = null; sourceNode = null; micStream = null; recognizer = null; audioCtx = null;
 }
 
-/** True if the recognized text contains any wake phrase (or the bare name). */
+/** Fuzzy phonetic wake matcher (2026-07-10 rewrite — "bardzo rzadko działa").
+ *  "gzowo" is OOV for the PL model, so the transcript lands on an unpredictable
+ *  neighbour ("zowo", "dzowo", "gzowa", "z owo", "sowo"…). A fixed substring
+ *  list can't cover that — instead we score real edit distance:
+ *    • any word within distance ≤1 of "gzowo" wakes on its own,
+ *    • after a trigger word ("hej"/"ok"/"okej"/"hey") distance ≤2 suffices,
+ *    • adjacent word PAIRS are also merged ("z owo" → "zowo") before scoring,
+ *  with a blacklist of common Polish words that sit 2 edits away ("słowo",
+ *  "zdrowo", "gotowo", "nowo") so casual speech doesn't false-wake. */
+const WAKE_TARGET = 'gzowo';
+// Vosk (PL, no grammar) can't spell the OOV name — "Hej Gzowo" comes back as
+// "hej", "ej", "hej sowo"; "Ok Gzowo" as "okej". So we ALSO accept a short,
+// deliberate call that is just a trigger word (v4 #4). The mic only runs while
+// idle/showing, so a bare "hej"/"okej" waking is acceptable and finally reliable.
+const WAKE_TARGET_MAX_WORDS = 3;
+const WAKE_TRIGGERS = new Set(['hej', 'hey', 'ej', 'ok', 'oki', 'oke', 'okej', 'okey', 'okay', 'gej']);
+const WAKE_BLACKLIST = new Set(['słowo', 'slowo', 'zdrowo', 'gotowo', 'nowo', 'mrowo', 'surowo']);
+
+function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  let prev = new Array(n + 1), cur = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+      );
+    }
+    [prev, cur] = [cur, prev];
+  }
+  return prev[n];
+}
+
+function wordWakes(word) {
+  if (!word || WAKE_BLACKLIST.has(word)) return false;
+  if (word.includes('gzow') || word.includes('zowo')) return true;
+  return editDistance(word, WAKE_TARGET) <= 2;
+}
+
 function matches(text) {
   if (!text) return false;
-  if (text.includes('gzowo')) return true; // distinctive enough on its own
-  return keywords.some((k) => text.includes(k));
+  if (keywords.some((k) => text.includes(k))) return true;   // exact phrases first
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > WAKE_TARGET_MAX_WORDS) return false; // only a short, deliberate call
+  // (a) a "gzowo"-ish token anywhere (incl. Vosk splitting it in two: "z owo").
+  for (let i = 0; i < words.length; i++) {
+    if (wordWakes(words[i])) return true;
+    if (i + 1 < words.length && wordWakes(words[i] + words[i + 1])) return true;
+  }
+  // (b) the name vanished but a trigger word survived ("hej", "okej") — wake.
+  if (words.some((w) => WAKE_TRIGGERS.has(w))) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Clap detection (v4-b #3, hardened 2026-07-10 — was firing on speech, hiding
+// widgets whenever Jurek talked). A CLAP is an IMPULSE: a loud peak with a very
+// high crest factor (peak ≫ RMS) preceded by near-silence. SPEECH is sustained
+// energy (low crest, no pre-silence), so it's rejected. Two qualifying impulses
+// 120–650ms apart = a double-clap → bus 'clap:double'.
+// ---------------------------------------------------------------------------
+const CLAP_PEAK = 0.35;         // impulse must be LOUD
+const CLAP_CREST = 6.5;         // peak / rms — claps ~10-20, speech ~2-4
+const CLAP_PRE_SILENCE = 0.05;  // the buffer BEFORE the impulse must be quiet
+const CLAP_REFRACTORY_MS = 110;
+const CLAP_MIN_GAP = 120, CLAP_MAX_GAP = 650;
+let clapPrevRms = 0;            // rms of the previous buffer (pre-silence test)
+let clapLastOnset = 0;
+let clapPrevOnset = 0;
+
+function detectClap(buf) {
+  let peak = 0, sq = 0;
+  for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > peak) peak = a; sq += buf[i] * buf[i]; }
+  const rms = Math.sqrt(sq / buf.length);
+  const crest = rms > 1e-4 ? peak / rms : 0;
+  const preSilent = clapPrevRms < CLAP_PRE_SILENCE;
+  const now = performance.now();
+  clapPrevRms = rms;   // update AFTER reading, so it reflects the buffer BEFORE the next
+  if (now - clapLastOnset < CLAP_REFRACTORY_MS) return;
+  if (peak >= CLAP_PEAK && crest >= CLAP_CREST && preSilent) {
+    clapPrevOnset = clapLastOnset;
+    clapLastOnset = now;
+    const gap = clapLastOnset - clapPrevOnset;
+    if (gap >= CLAP_MIN_GAP && gap <= CLAP_MAX_GAP) {
+      clapPrevOnset = clapLastOnset = 0;        // consume the pair
+      bus.emit('sound:play', { name: 'blip-in' });
+      bus.emit('clap:double', {});
+    }
+  }
 }
 
 /** Emit the wake event (debounced), letting gemini-live open the session. */

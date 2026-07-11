@@ -30,18 +30,10 @@ body[data-ui='auth'] .island-reveal {
 body[data-ui='auth'] #islands { pointer-events: none; }
 body[data-ui='auth'] #islands > * { pointer-events: none; }
 
-/* ---- Float wrapper: perpetual idle bob ---- */
+/* ---- Float wrapper: STATIC (Jurek 2026-07-09 — the bottom pills must not move).
+   Kept as a no-op layer so the three-transform split stays intact. ---- */
 .island-bob {
-  animation: island-bob 4s var(--ease-in-out) infinite alternate;
-  will-change: transform;
-}
-/* Phase-offset the second pill so the two never move in lockstep. */
-.island-reveal.is-second .island-bob {
-  animation-delay: -2s;
-}
-@keyframes island-bob {
-  from { transform: translateY(3px); }
-  to   { transform: translateY(-3px); }
+  transform: translateY(0);
 }
 /* The modes pill wrapper doubles as the positioning context for its panel. */
 .island-group { position: relative; }

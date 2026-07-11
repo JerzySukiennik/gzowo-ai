@@ -1,0 +1,244 @@
+/* css/theme-ui-ux.css — motyw "UI/UX" (v3 #18): INK & PAPER.
+   Autorski redesign z wolną ręką (decyzja Jurka 2026-07-10): ciepły papier,
+   ATRAMENTOWY awatar (inwersja — czarna kula zamiast białej), międzynarodowy
+   pomarańcz #ff4a00 jako jedyny akcent, Futura/Avenir, twarde offsetowe cienie
+   w miejsce liquid glass (świadomie wyłączony tutaj — psuł wizję papieru).
+   Inspiracja: Braun/Dieter Rams + szwajcarska typografia + print design.
+
+   TWARDA ZASADA (#18.3): KAŻDA reguła w tym pliku jest zscope'owana do
+   [data-theme='ui-ux'] — pozostałe motywy pozostają nietknięte. */
+
+/* =========================================================================
+   1. PAPIER — kropkowana siatka zamiast linii + rama arkusza + masthead.
+   ========================================================================= */
+[data-theme='ui-ux'] #grid-bg {
+  background-image:
+    radial-gradient(var(--grid-line) 1.1px, transparent 1.1px);
+  background-size: var(--grid-size) var(--grid-size);
+  background-position: center center;
+}
+/* Rama "arkusza" jak w druku — cienka linia atramentu 14px od krawędzi. */
+[data-theme='ui-ux'] #grid-bg::before {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border: 1.5px solid rgba(23, 20, 16, 0.55);
+  border-radius: 4px;
+  pointer-events: none;
+}
+/* Kolofon — drukowana stopka arkusza (dół-lewo; róg górny należy do awatara
+   w stanie showing, dolny-prawy do kosza). */
+[data-theme='ui-ux'] #grid-bg::after {
+  content: 'GZOWO AI — ARKUSZ ROBOCZY №1';
+  position: absolute;
+  bottom: 24px;
+  left: 32px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  pointer-events: none;
+}
+
+/* Kropka akcentu w prawym-górnym rogu (pomarańcz — jedyny kolor na papierze). */
+[data-theme='ui-ux'] #islands::before {
+  content: '';
+  position: fixed;
+  top: 25px;
+  right: 32px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--uiux-accent);
+  pointer-events: none;
+}
+
+/* Scena tematyczna wyłączona — papier ma być cichy. */
+[data-theme='ui-ux'] #theme-scene { display: none; }
+
+/* =========================================================================
+   2. AWATAR — INK ORB. Inwersja całego canvasa: biała kula → atrament na
+   papierze, glow → miękki rozlew tuszu. Czysty CSS, zero zmian w JS,
+   działa tylko tutaj. Lekkie ocieplenie czerni sepią.
+   ========================================================================= */
+[data-theme='ui-ux'] #avatar-canvas {
+  filter: invert(1) sepia(0.14) contrast(1.08) brightness(1.04);
+}
+
+/* =========================================================================
+   3. GLASS → PAPIER. glass.js wpisuje backdrop-filter inline, więc !important
+   jest tu celowe i konieczne (jedyny motyw, który wyłącza refrakcję).
+   ========================================================================= */
+[data-theme='ui-ux'] .glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: var(--glass-bg);
+  border: 1.5px solid var(--glass-border);
+  box-shadow: var(--uiux-shadow);
+}
+
+/* =========================================================================
+   4. WYSPY — konsola z kartonu: grube ramki, wersaliki Futury, podniesienie
+   na hover jak fizyczny klawisz, pomarańczowa lampka gdy głos żyje.
+   ========================================================================= */
+[data-theme='ui-ux'] .island {
+  font-family: var(--font-text);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--uiux-ink);
+  transition: transform 120ms var(--ease-out), box-shadow 120ms var(--ease-out);
+}
+[data-theme='ui-ux'] .island:hover {
+  transform: translate(-2px, -2px);
+  box-shadow: 8px 8px 0 rgba(23, 20, 16, 0.16);
+}
+[data-theme='ui-ux'] .island:active {
+  transform: translate(2px, 2px);
+  box-shadow: 2px 2px 0 rgba(23, 20, 16, 0.14);
+}
+/* Lampka stanu głosu — pomarańczowa dioda jak w sprzęcie Brauna. */
+[data-theme='ui-ux'] .island-voice::after {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--uiux-ink);
+  background: transparent;
+  vertical-align: 1px;
+  transition: background 150ms var(--ease-out);
+}
+[data-theme='ui-ux'] .island-voice.is-connecting::after {
+  background: var(--uiux-accent);
+  animation: uiux-blink 0.7s steps(1) infinite;
+}
+[data-theme='ui-ux'] .island-voice.is-live::after {
+  background: var(--uiux-accent);
+  border-color: var(--uiux-accent);
+}
+@keyframes uiux-blink { 50% { background: transparent; } }
+
+/* Panel TRYBY — aktywna opcja = atrament, akcent na hover. */
+[data-theme='ui-ux'] .modes-panel { box-shadow: var(--uiux-shadow); }
+
+/* =========================================================================
+   5. WIDGETY — karty katalogowe: papier, atramentowa ramka, twardy cień,
+   pomarańczowy kwadracik-indeks w nagłówku, wersaliki.
+   ========================================================================= */
+[data-theme='ui-ux'] .widget {
+  background: var(--bg-raised);
+  border: 1.5px solid var(--uiux-ink);
+  box-shadow: var(--uiux-shadow);
+}
+[data-theme='ui-ux'] .widget-head {
+  border-bottom: 1.5px solid var(--uiux-ink);
+  color: var(--uiux-ink);
+  font-family: var(--font-text);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+[data-theme='ui-ux'] .widget-head::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  background: var(--uiux-accent);
+  flex: 0 0 auto;
+}
+/* Akcent w treści widgetów = pomarańcz (jedyny kolor). */
+[data-theme='ui-ux'] .widget-body { --wx-accent: var(--uiux-accent); --tmr-accent: var(--uiux-accent); }
+
+/* Aura podkreślenia — pomarańczowa na papierze (spójna z resztą motywu). */
+[data-theme='ui-ux'] .widget.is-emphasized {
+  border-color: var(--widget-accent, var(--uiux-accent));
+  box-shadow:
+    0 0 0 2px var(--widget-accent, var(--uiux-accent)),
+    8px 8px 0 rgba(23, 20, 16, 0.14);
+  animation: none;              /* na papierze aura nie oddycha — druk jest stały */
+}
+
+/* =========================================================================
+   6. CHAT — zadokowany PANEL KONSOLI przy prawej krawędzi (redesign układu,
+   #18.1). Inline transform z JS wyłączony !important-em — w tym motywie dymek
+   jest stałym elementem arkusza, nie lataczem (drag zbędny z założenia).
+   ========================================================================= */
+[data-theme='ui-ux'] #chat-bubble {
+  transform: none !important;
+  top: auto !important;
+  left: auto !important;
+  right: 28px;
+  bottom: calc(var(--islands-clearance) + 16px);
+}
+[data-theme='ui-ux'] #chat-bubble::before { display: none; }   /* bez ogonka */
+[data-theme='ui-ux'] .chat-card {
+  width: min(400px, 88vw);
+  border-radius: var(--glass-radius-sm);
+}
+[data-theme='ui-ux'] .chat-grip { display: none; }             /* dok = bez dragu */
+[data-theme='ui-ux'] .chat-user-prefix { color: var(--uiux-accent); }
+[data-theme='ui-ux'] .chat-caret { color: var(--uiux-accent); }
+[data-theme='ui-ux'] .chat-submit:hover {
+  background: var(--uiux-accent);
+  border-color: var(--uiux-accent);
+  color: #fff;
+}
+
+/* =========================================================================
+   7. FORMY: auth / ustawienia / dialogi / toasty — druki biurowe.
+   ========================================================================= */
+[data-theme='ui-ux'] .auth-submit {
+  background: var(--uiux-accent);
+  border-color: var(--uiux-accent);
+  color: #fff;
+  font-family: var(--font-text);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+}
+[data-theme='ui-ux'] .auth-submit:hover { filter: brightness(0.94); }
+[data-theme='ui-ux'] .auth-wordmark {
+  font-family: var(--font-text);
+  font-weight: 700;
+  letter-spacing: 0.28em;
+}
+[data-theme='ui-ux'] .auth-input {
+  border-bottom-color: var(--uiux-ink);
+}
+[data-theme='ui-ux'] .auth-input:focus { border-bottom-color: var(--uiux-accent); }
+
+[data-theme='ui-ux'] .settings-title,
+[data-theme='ui-ux'] .settings-label {
+  font-family: var(--font-text);
+  font-weight: 700;
+}
+[data-theme='ui-ux'] .seg { border-color: var(--uiux-ink); }
+[data-theme='ui-ux'] .seg-opt + .seg-opt { border-left-color: var(--uiux-ink); }
+[data-theme='ui-ux'] .seg-opt.is-active { background: var(--uiux-ink); color: var(--bg-raised); }
+[data-theme='ui-ux'] .seg-opt:hover { color: var(--uiux-accent); }
+[data-theme='ui-ux'] .settings-logout:hover,
+[data-theme='ui-ux'] .connector-btn:hover,
+[data-theme='ui-ux'] .gz-confirm-btn.is-primary {
+  background: var(--uiux-accent);
+  border-color: var(--uiux-accent);
+  color: #fff;
+}
+
+/* Toast — kartka z notatką: cień + akcentowa krawędź. */
+[data-theme='ui-ux'] .gz-toast {
+  border-left: 4px solid var(--uiux-accent);
+}
+
+/* Kosz — papierowy krążek z atramentową ikoną. */
+[data-theme='ui-ux'] .trash-disc { color: var(--uiux-ink); }
+
+/* =========================================================================
+   8. DETALE — zaznaczenie tekstu, fokus, reduced-motion.
+   ========================================================================= */
+[data-theme='ui-ux'] ::selection { background: var(--uiux-accent); color: #fff; }
+[data-theme='ui-ux'] :focus-visible { outline: 2px solid var(--uiux-accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  [data-theme='ui-ux'] .island,
+  [data-theme='ui-ux'] .island:hover,
+  [data-theme='ui-ux'] .island:active { transform: none; transition: none; }
+}
