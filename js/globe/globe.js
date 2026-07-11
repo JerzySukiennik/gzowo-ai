@@ -58,6 +58,20 @@ function loadCesium() {
   return cesiumLoading;
 }
 
+// Cesium ion token: config (public, usually empty) OR the bridge /cesium-token
+// (local, keeps the token out of the public repo). Empty -> free Esri only.
+async function ionToken() {
+  const cfgTok = (CONFIG.cesium && CONFIG.cesium.ionToken) || '';
+  if (cfgTok) return cfgTok;
+  const base = ((CONFIG.bridge && CONFIG.bridge.url) || '').replace(/\/$/, '');
+  if (!base) return '';
+  try {
+    const r = await fetch(base + '/cesium-token');
+    if (r.ok) { const d = await r.json(); return d.token || ''; }
+  } catch (_e) { /* no bridge */ }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Overlay + HUD
 // ---------------------------------------------------------------------------
@@ -100,6 +114,12 @@ async function showGlobe() {
   document.body.dataset.globe = 'on';           // CSS hides widgets/avatar/islands
   active = true;
 
+  // 3D source precedence: Google Photorealistic (needs key+card) > Cesium ion
+  // (terrain + OSM buildings + Bing imagery, free/no-card) > free Esri flat.
+  const gkey = (CONFIG.google3d && CONFIG.google3d.key) || '';
+  const ionTok = gkey ? '' : await ionToken();
+  if (ionTok) { try { Cesium.Ion.defaultAccessToken = ionTok; } catch (_e) { /* ignore */ } }
+
   const canvasEl = layer.querySelector('#globe-canvas');
   viewer = new Cesium.Viewer(canvasEl, {
     baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
@@ -114,24 +134,42 @@ async function showGlobe() {
   viewer.scene.fog.enabled = true;
   viewer.scene.skyAtmosphere.show = true;
 
-  // FREE base imagery (Esri World Imagery, no key).
-  try {
-    viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
-      url: ESRI_URL, maximumLevel: 19, credit: 'Esri World Imagery'
-    }));
-  } catch (e) { console.warn('[globe] Esri imagery failed', e); }
+  // Imagery: Bing aerial via ion when we have a token, else free Esri.
+  let usedEsri = true;
+  if (ionTok) {
+    try {
+      viewer.imageryLayers.addImageryProvider(await Cesium.IonImageryProvider.fromAssetId(2)); // Bing Aerial
+      usedEsri = false;
+    } catch (e) { console.warn('[globe] ion imagery failed — Esri fallback', e); }
+  }
+  if (usedEsri) {
+    try {
+      viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
+        url: ESRI_URL, maximumLevel: 19, credit: 'Esri World Imagery'
+      }));
+    } catch (e) { console.warn('[globe] Esri imagery failed', e); }
+  }
 
-  // Optional Google Photorealistic 3D Tiles (buildings) when a key is present.
-  const gkey = (CONFIG.google3d && CONFIG.google3d.key) || '';
+  // 3D layer.
   if (gkey) {
+    // Premium: Google Photorealistic 3D Tiles (textured buildings).
     try {
       const tileset = await Cesium.createGooglePhotorealistic3DTileset({ key: gkey });
       viewer.scene.primitives.add(tileset);
-      bus.emit('toast', { text: '🌍 Google 3D Tiles włączone.', kind: 'info' });
+      bus.emit('toast', { text: '🌍 Google 3D Tiles (fototekstury) włączone.', kind: 'info' });
     } catch (e) {
-      console.warn('[globe] Google 3D tiles failed — staying on Esri', e);
-      bus.emit('toast', { text: 'Google 3D niedostępne (klucz/quota) — używam darmowych zdjęć.', kind: 'warn' });
+      console.warn('[globe] Google 3D tiles failed — flat imagery', e);
+      bus.emit('toast', { text: 'Google 3D niedostępne (klucz/quota) — płaskie zdjęcia.', kind: 'warn' });
     }
+  } else if (ionTok) {
+    // Free (no card): real terrain + global OSM 3D building shapes.
+    try { viewer.terrainProvider = await Cesium.createWorldTerrainAsync(); }
+    catch (e) { console.warn('[globe] world terrain failed', e); }
+    try {
+      const osm = await Cesium.createOsmBuildingsAsync();
+      viewer.scene.primitives.add(osm);
+      bus.emit('toast', { text: '🌍 Cesium ion: teren + budynki 3D (bez fototekstur).', kind: 'info' });
+    } catch (e) { console.warn('[globe] OSM buildings failed', e); }
   }
 
   // Pointer pick -> satellite panel.

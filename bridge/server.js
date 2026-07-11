@@ -969,7 +969,7 @@ const server = http.createServer(async (req, res) => {
     path === '/ha/camera' || path === '/ha/rooms' || path === '/fetch' || path === '/embed-check' || path === '/proxy' ||
     path === '/brain/index' || path === '/brain/file' || path === '/brain/draft' ||
     path === '/brain/save' || path === '/brain/flightlog' || path === '/brain/search' ||
-    path === '/apple-notes' || path === '/notify' ||
+    path === '/apple-notes' || path === '/notify' || path === '/cesium-token' ||
     path === '/skills/generate';
 
   // Log one line per request when finished.
@@ -1014,6 +1014,7 @@ const server = http.createServer(async (req, res) => {
     if (path === '/brain/search' && req.method === 'GET') return await handleBrainSearch(req, res, url);
     if (path === '/apple-notes' && (req.method === 'GET' || req.method === 'POST')) return await handleAppleNotes(req, res, url);
     if (path === '/notify' && req.method === 'POST') return await handleNotify(req, res);
+    if (path === '/cesium-token' && req.method === 'GET') return sendJson(res, 200, { token: env.CESIUM_ION_TOKEN || '' });
     if (path === '/skills/generate' && req.method === 'POST') return await handleSkillGenerate(req, res);
 
     // Anything else = static file serving (GET + HEAD; HEAD is headers-only).
