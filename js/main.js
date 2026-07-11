@@ -56,7 +56,7 @@ const [
   islandsMod, chatMod, trashMod, settingsMod, customAuthMod, startupMod,
   personaMod, geminiMod, wakeMod, modesMod, widgetToolsMod, homeMod,
   bambuMod, skillsMod, marketplaceMod, webEmbedMod, brainToolsMod, zabaMod, widgetCtrlMod, gravityMod, skillForgeMod, buildFlowMod, automationsMod,
-  notifyMod, scenesMod, memoryToolsMod, appleNotesMod, printerWatchMod, briefMod, launchMod, liveStyleMod
+  notifyMod, scenesMod, memoryToolsMod, appleNotesMod, printerWatchMod, briefMod, launchMod, liveStyleMod, globeMod
 ] = await Promise.all([
   load('./bridge-client.js'),
   load('./audio/sound.js'),
@@ -96,7 +96,8 @@ const [
   load('./skills/printer-watch.js'),
   load('./skills/brief.js'),
   load('./skills/launch.js'),
-  load('./skills/live-style.js')
+  load('./skills/live-style.js'),
+  load('./globe/globe.js')
 ]);
 void personaMod; // referenced only for its side-effect-free data exports
 
@@ -152,6 +153,7 @@ await safeInit('printer-watch', () => printerWatchMod?.init?.());
 await safeInit('brief',         () => briefMod?.init?.());
 await safeInit('launch',        () => launchMod?.init?.());
 await safeInit('live-style',    () => liveStyleMod?.init?.());
+await safeInit('globe',         () => globeMod?.init?.());
 
 // ---- 5. Boot done ----------------------------------------------------------
 // custom-auth listens for this to release its deferred 'auth:ready'.

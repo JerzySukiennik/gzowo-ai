@@ -57,5 +57,13 @@ export const CONFIG = {
   // --- Rocket launch site (launch_weather go/no-go). From Jurek's plus code
   //     H3R9+4F Dzbanice (06-114) — locality point, fine for regional weather.
   //     Swap lat/lon for the exact pad if needed. ---
-  launchSite: { lat: 52.6056, lon: 21.0768, name: 'Dzbanice' }
+  launchSite: { lat: 52.6056, lon: 21.0768, name: 'Dzbanice' },
+
+  // --- GLOBE mode (Cesium). Base imagery is FREE Esri World Imagery (no key).
+  //     google3d.key upgrades to Google Photorealistic 3D Tiles (buildings) —
+  //     needs a Google Maps Platform key with Map Tiles API + billing. PUBLIC-SAFE
+  //     but MUST be HTTP-referrer restricted + quota-capped. Empty = free Esri base.
+  google3d: { key: '' },
+  // Canonical Gzowo plot point (top-down "działka" view). 52°36'46.0"N 21°06'57.7"E.
+  gzowo: { lat: 52.612778, lon: 21.116028, name: 'Gzowo — działka' }
 };
