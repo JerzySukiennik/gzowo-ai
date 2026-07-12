@@ -211,7 +211,12 @@ async function showGlobe() {
 
   // 3D layer.
   if (gkey) {
-    try { viewer.scene.primitives.add(await Cesium.createGooglePhotorealistic3DTileset({ key: gkey })); bus.emit('toast', { text: '🌍 Google 3D (fototekstury).', kind: 'info' }); }
+    try {
+      if (Cesium.GoogleMaps) Cesium.GoogleMaps.defaultApiKey = gkey;
+      const tilesetOpts = Cesium.GoogleMaps ? {} : { key: gkey };
+      viewer.scene.primitives.add(await Cesium.createGooglePhotorealistic3DTileset(tilesetOpts));
+      bus.emit('toast', { text: '🌍 Google 3D (fototekstury).', kind: 'info' });
+    }
     catch (e) { console.warn('[globe] Google 3D failed', e); bus.emit('toast', { text: 'Google 3D niedostępne — płaskie zdjęcia.', kind: 'warn' }); }
   } else if (ionTok) {
     // Free look: crisp Bing aerial on REAL 3D terrain (looks more "drone" than grey
