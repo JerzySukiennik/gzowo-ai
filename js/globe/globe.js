@@ -1,11 +1,13 @@
 // js/globe/globe.js — GLOBE ("Spatial") mode. Cesium takeover: the avatar becomes
-// an interactive Google-Earth-like globe, driven by voice + mouse. FREE Esri base
-// imagery; Google Photorealistic 3D Tiles when config.google3d.key is set (else
-// honest fallback to Esri). Layers: satellites (CelesTrak TLE + satellite.js,
-// colour-coded), ISS (position + NASA video), planes (OpenSky), static Gzowo plot.
+// an interactive globe, driven by voice + mouse. 3D precedence: Google Photorealistic
+// (key+card) > Cesium ion (terrain + OSM buildings + Bing, free) > free Esri flat.
+// Earth sits in a BLACK void (no stars/sun/moon). Cesium is lazy-loaded on first
+// show_globe so it never touches boot. Everything degrades honestly.
 //
-// Cesium is loaded LAZILY (only on first show_globe) so it never touches boot.
-// Everything degrades honestly; every tool returns a real result. English code.
+// HUD is exactly two sections (Jurek's spec): SATELITY (bottom-left: toggle +
+// per-type filter legend) and SAMOLOTY (bottom-right: toggle + commercial/military +
+// live count). The HUD auto-shows only when the whole Earth is in view and smoothly
+// hides when zoomed into a place. All of it is also assistant-controllable/readable.
 
 import { bus } from '../core/event-bus.js';
 import { state } from '../core/state-manager.js';
@@ -18,27 +20,32 @@ const CONFIG = window.GZOWO_CONFIG || {};
 const CESIUM_VER = '1.123.0';
 const CESIUM_BASE = 'https://cdn.jsdelivr.net/npm/cesium@' + CESIUM_VER + '/Build/Cesium/';
 const ESRI_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-const NASA_ISS_VIDEO = 'https://www.youtube.com/embed/H999s0P1Er0?autoplay=1&mute=1'; // NASA ISS live
+const NASA_ISS_VIDEO = 'https://www.youtube.com/embed/H999s0P1Er0?autoplay=1&mute=1';
 
-let Cesium = null;         // set after lazy load
+let Cesium = null;
 let viewer = null;
-let layer = null;          // #globe-layer overlay
+let layer = null;
 let active = false;
-let cesiumLoading = null;  // in-flight load promise
+let cesiumLoading = null;
 
-// Layer state
-let satCatalog = [];       // live sats
-let histCatalog = [];      // reconstruction sats
-let satEntities = [];      // Cesium entities for sats
+// Satellite layer
+let satCatalog = [];
+let histCatalog = [];
+let satEntities = [];
 let satsOn = false;
+const visibleCats = new Set(Object.keys(CATEGORIES));   // all types shown by default
+let issEntity = null;
+const satCache = new Map();
+
+// Planes layer
 let planesOn = false;
 let planeTimer = 0;
 let planeEntities = new Map();
-let issEntity = null;
-const satCache = new Map(); // id -> {t, cart}
+const planeFilter = { commercial: true, military: true };
+let planeCount = 0, planeMil = 0;
 
 // ---------------------------------------------------------------------------
-// Lazy Cesium loader (UMD build via <script>, needs CESIUM_BASE_URL + CSS).
+// Lazy Cesium loader
 // ---------------------------------------------------------------------------
 function loadCesium() {
   if (Cesium) return Promise.resolve(Cesium);
@@ -46,8 +53,7 @@ function loadCesium() {
   cesiumLoading = new Promise((resolve, reject) => {
     window.CESIUM_BASE_URL = CESIUM_BASE;
     const css = document.createElement('link');
-    css.rel = 'stylesheet';
-    css.href = CESIUM_BASE + 'Widgets/widgets.css';
+    css.rel = 'stylesheet'; css.href = CESIUM_BASE + 'Widgets/widgets.css';
     document.head.appendChild(css);
     const s = document.createElement('script');
     s.src = CESIUM_BASE + 'Cesium.js';
@@ -58,64 +64,100 @@ function loadCesium() {
   return cesiumLoading;
 }
 
-// Cesium ion token: config (public, usually empty) OR the bridge /cesium-token
-// (local, keeps the token out of the public repo). Empty -> free Esri only.
 async function ionToken() {
   const cfgTok = (CONFIG.cesium && CONFIG.cesium.ionToken) || '';
   if (cfgTok) return cfgTok;
   const base = ((CONFIG.bridge && CONFIG.bridge.url) || '').replace(/\/$/, '');
   if (!base) return '';
-  try {
-    const r = await fetch(base + '/cesium-token');
-    if (r.ok) { const d = await r.json(); return d.token || ''; }
-  } catch (_e) { /* no bridge */ }
+  try { const r = await fetch(base + '/cesium-token'); if (r.ok) { const d = await r.json(); return d.token || ''; } }
+  catch (_e) { /* no bridge */ }
   return '';
 }
 
+function escapeHTML(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 // ---------------------------------------------------------------------------
-// Overlay + HUD
+// HUD (exactly two sections + triggered panel/video)
 // ---------------------------------------------------------------------------
 function buildLayer() {
   layer = document.getElementById('globe-layer');
-  if (!layer) {
-    layer = document.createElement('div');
-    layer.id = 'globe-layer';
-    document.body.appendChild(layer);
-  }
+  if (!layer) { layer = document.createElement('div'); layer.id = 'globe-layer'; document.body.appendChild(layer); }
   layer.innerHTML =
     '<div id="globe-canvas"></div>' +
-    '<button id="globe-exit" title="Schowaj glob (Esc)">✕ SCHOWAJ GLOB</button>' +
-    '<div id="globe-legend" hidden></div>' +
+    '<div id="globe-sats" class="gl-hud"></div>' +
+    '<div id="globe-planes" class="gl-hud"></div>' +
     '<div id="globe-panel" hidden></div>' +
     '<div id="globe-video" hidden></div>';
-  layer.querySelector('#globe-exit').addEventListener('click', () => hideGlobe());
+  renderSatsSection();
+  renderPlanesSection();
   return layer;
 }
 
-function renderLegend() {
-  const el = layer.querySelector('#globe-legend');
-  if (!satsOn) { el.hidden = true; return; }
-  el.hidden = false;
-  el.innerHTML = '<div class="gl-legend-title">SATELITY</div>' +
-    Object.values(CATEGORIES).map((c) =>
-      `<div class="gl-legend-row"><span class="gl-dot" style="background:${c.color}"></span>${c.label}</div>`
-    ).join('');
+// SATELITY (bottom-left): master toggle + per-type filter checkboxes.
+function renderSatsSection() {
+  const el = layer.querySelector('#globe-sats');
+  const rows = Object.entries(CATEGORIES).map(([key, c]) =>
+    `<label class="gl-flt"><input type="checkbox" data-cat="${key}" ${visibleCats.has(key) ? 'checked' : ''}>` +
+    `<span class="gl-dot" style="background:${c.color}"></span>${escapeHTML(c.label)}</label>`
+  ).join('');
+  el.innerHTML =
+    `<div class="gl-sec-head"><span>SATELITY</span>` +
+    `<button class="gl-switch ${satsOn ? 'on' : ''}" data-role="sat-toggle">${satsOn ? 'ON' : 'OFF'}</button></div>` +
+    `<div class="gl-filters" ${satsOn ? '' : 'hidden'}>${rows}</div>`;
+  el.querySelector('[data-role="sat-toggle"]').addEventListener('click', () => setSatellites(!satsOn));
+  el.querySelectorAll('input[data-cat]').forEach((cb) => cb.addEventListener('change', () => {
+    if (cb.checked) visibleCats.add(cb.dataset.cat); else visibleCats.delete(cb.dataset.cat);
+    applySatFilter();
+  }));
+}
+
+// SAMOLOTY (bottom-right): master toggle + commercial/military + live count.
+function renderPlanesSection() {
+  const el = layer.querySelector('#globe-planes');
+  el.innerHTML =
+    `<div class="gl-sec-head"><span>SAMOLOTY</span>` +
+    `<button class="gl-switch ${planesOn ? 'on' : ''}" data-role="pl-toggle">${planesOn ? 'ON' : 'OFF'}</button></div>` +
+    `<div class="gl-pl-body" ${planesOn ? '' : 'hidden'}>` +
+      `<label class="gl-flt"><input type="checkbox" data-pl="commercial" ${planeFilter.commercial ? 'checked' : ''}><span class="gl-dot" style="background:#fff"></span>Komercyjne</label>` +
+      `<label class="gl-flt"><input type="checkbox" data-pl="military" ${planeFilter.military ? 'checked' : ''}><span class="gl-dot" style="background:#ff6a3d"></span>Wojskowe <span class="gl-approx">(przybliżone)</span></label>` +
+      `<div class="gl-count" data-role="pl-count">${planesOn ? planeCount + ' w powietrzu' : '—'}</div>` +
+    `</div>`;
+  el.querySelector('[data-role="pl-toggle"]').addEventListener('click', () => setPlanes(!planesOn));
+  el.querySelectorAll('input[data-pl]').forEach((cb) => cb.addEventListener('change', () => {
+    planeFilter[cb.dataset.pl] = cb.checked; applyPlaneFilter();
+  }));
+}
+
+function updatePlanesCountUI() {
+  const el = layer && layer.querySelector('[data-role="pl-count"]');
+  if (el) el.textContent = planesOn ? (planeCount + ' w powietrzu' + (planeFilter.military && planeMil ? ' · ~' + planeMil + ' wojsk.' : '')) : '—';
+}
+
+// Auto-hide: HUD shows only when the whole Earth is in view; smooth-hides when
+// zoomed into a place. computeViewRectangle() returns undefined when the full
+// globe is visible — that's our "whole earth" signal (plus a height guard).
+function updateHudVisibility() {
+  if (!viewer) return;
+  let whole;
+  try { whole = !viewer.camera.computeViewRectangle() || cameraHeight() > 7_000_000; }
+  catch (_e) { whole = true; }
+  layer.classList.toggle('gl-far', !!whole);
 }
 
 // ---------------------------------------------------------------------------
 // Show / hide (takeover)
 // ---------------------------------------------------------------------------
 async function showGlobe() {
-  if (active) { return { ok: true, already: true }; }
+  if (active) return { ok: true, already: true };
   try { await loadCesium(); }
   catch (e) { return { ok: false, error: 'Nie udało się załadować silnika globu (Cesium): ' + (e.message || e) }; }
 
   buildLayer();
-  document.body.dataset.globe = 'on';           // CSS hides widgets/avatar/islands
+  document.body.dataset.globe = 'on';
   active = true;
 
-  // 3D source precedence: Google Photorealistic (needs key+card) > Cesium ion
-  // (terrain + OSM buildings + Bing imagery, free/no-card) > free Esri flat.
   const gkey = (CONFIG.google3d && CONFIG.google3d.key) || '';
   const ionTok = gkey ? '' : await ionToken();
   if (ionTok) { try { Cesium.Ion.defaultAccessToken = ionTok; } catch (_e) { /* ignore */ } }
@@ -127,59 +169,57 @@ async function showGlobe() {
     infoBox: false, selectionIndicator: false, requestRenderMode: false, baseLayer: false,
     contextOptions: { webgl: { powerPreference: 'high-performance' } }
   });
-  // Chrome-free + performance tuning for a 2019 Intel Mac (smoothness > detail).
   viewer.cesiumWidget.creditContainer.style.display = 'none';
-  viewer.scene.globe.maximumScreenSpaceError = 2.2;   // higher = fewer tiles
-  viewer.resolutionScale = Math.min(1, (window.devicePixelRatio || 1) >= 2 ? 0.85 : 1);
-  viewer.scene.fog.enabled = true;
-  viewer.scene.skyAtmosphere.show = true;
+  viewer.scene.globe.maximumScreenSpaceError = 2.2;
+  viewer.resolutionScale = (window.devicePixelRatio || 1) >= 2 ? 0.85 : 1;
 
-  // Imagery: Bing aerial via ion when we have a token, else free Esri.
+  // Earth in a black void — no stars, sun or moon (Jurek #4). Keep the thin
+  // atmosphere glow (that's Earth, not the sky).
+  try {
+    viewer.scene.skyBox.show = false;
+    viewer.scene.sun.show = false;
+    viewer.scene.moon.show = false;
+    viewer.scene.backgroundColor = Cesium.Color.BLACK;
+    viewer.scene.skyAtmosphere.show = true;
+    viewer.scene.fog.enabled = true;
+  } catch (_e) { /* older Cesium — non-fatal */ }
+
+  // Imagery: Bing via ion when available, else free Esri.
   let usedEsri = true;
   if (ionTok) {
-    try {
-      viewer.imageryLayers.addImageryProvider(await Cesium.IonImageryProvider.fromAssetId(2)); // Bing Aerial
-      usedEsri = false;
-    } catch (e) { console.warn('[globe] ion imagery failed — Esri fallback', e); }
+    try { viewer.imageryLayers.addImageryProvider(await Cesium.IonImageryProvider.fromAssetId(2)); usedEsri = false; }
+    catch (e) { console.warn('[globe] ion imagery failed — Esri fallback', e); }
   }
   if (usedEsri) {
-    try {
-      viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({
-        url: ESRI_URL, maximumLevel: 19, credit: 'Esri World Imagery'
-      }));
-    } catch (e) { console.warn('[globe] Esri imagery failed', e); }
+    try { viewer.imageryLayers.addImageryProvider(new Cesium.UrlTemplateImageryProvider({ url: ESRI_URL, maximumLevel: 19, credit: 'Esri World Imagery' })); }
+    catch (e) { console.warn('[globe] Esri imagery failed', e); }
   }
 
   // 3D layer.
   if (gkey) {
-    // Premium: Google Photorealistic 3D Tiles (textured buildings).
-    try {
-      const tileset = await Cesium.createGooglePhotorealistic3DTileset({ key: gkey });
-      viewer.scene.primitives.add(tileset);
-      bus.emit('toast', { text: '🌍 Google 3D Tiles (fototekstury) włączone.', kind: 'info' });
-    } catch (e) {
-      console.warn('[globe] Google 3D tiles failed — flat imagery', e);
-      bus.emit('toast', { text: 'Google 3D niedostępne (klucz/quota) — płaskie zdjęcia.', kind: 'warn' });
-    }
+    try { viewer.scene.primitives.add(await Cesium.createGooglePhotorealistic3DTileset({ key: gkey })); bus.emit('toast', { text: '🌍 Google 3D (fototekstury).', kind: 'info' }); }
+    catch (e) { console.warn('[globe] Google 3D failed', e); bus.emit('toast', { text: 'Google 3D niedostępne — płaskie zdjęcia.', kind: 'warn' }); }
   } else if (ionTok) {
-    // Free (no card): real terrain + global OSM 3D building shapes.
-    try { viewer.terrainProvider = await Cesium.createWorldTerrainAsync(); }
-    catch (e) { console.warn('[globe] world terrain failed', e); }
-    try {
-      const osm = await Cesium.createOsmBuildingsAsync();
-      viewer.scene.primitives.add(osm);
-      bus.emit('toast', { text: '🌍 Cesium ion: teren + budynki 3D (bez fototekstur).', kind: 'info' });
-    } catch (e) { console.warn('[globe] OSM buildings failed', e); }
+    try { viewer.terrainProvider = await Cesium.createWorldTerrainAsync(); } catch (e) { console.warn('[globe] terrain failed', e); }
+    try { viewer.scene.primitives.add(await Cesium.createOsmBuildingsAsync()); bus.emit('toast', { text: '🌍 Cesium ion: teren + budynki 3D.', kind: 'info' }); }
+    catch (e) { console.warn('[globe] OSM buildings failed', e); }
   }
 
-  // Pointer pick -> satellite panel.
   viewer.screenSpaceEventHandler.setInputAction((click) => {
     const picked = viewer.scene.pick(click.position);
     if (picked && picked.id && picked.id._satData) openSatPanel(picked.id._satData);
   }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-  // Start on the whole globe.
+  // HUD auto-hide follows the camera.
+  viewer.camera.percentageChanged = 0.15;
+  viewer.camera.changed.addEventListener(updateHudVisibility);
+  viewer.camera.moveEnd.addEventListener(updateHudVisibility);
+
   viewer.camera.flyHome(0);
+  updateHudVisibility();
+
+  // Let the text chat live over the globe (Jurek #3).
+  allowChatOnGlobe(true);
 
   bus.emit('globe:shown', {});
   return { ok: true };
@@ -188,9 +228,10 @@ async function showGlobe() {
 function hideGlobe() {
   if (!active) return { ok: false, error: 'glob nie jest otwarty' };
   stopPlanes();
+  allowChatOnGlobe(false);
   try { viewer && viewer.destroy(); } catch (_e) { /* ignore */ }
   viewer = null;
-  satEntities = []; satsOn = false; planesOn = false; issEntity = null;
+  satEntities = []; satsOn = false; issEntity = null;
   planeEntities = new Map(); satCache.clear();
   delete document.body.dataset.globe;
   if (layer) { try { layer.remove(); } catch (_e) { /* ignore */ } layer = null; }
@@ -199,56 +240,54 @@ function hideGlobe() {
   return { ok: true };
 }
 
-// Esc closes globe.
+// Keep the chat bubble usable over the globe: unhidden + on top; re-evaluate so
+// it shows if Jurek is in a text mode.
+function allowChatOnGlobe(on) {
+  const cb = document.getElementById('chat-bubble');
+  if (cb) cb.classList.toggle('over-globe', !!on);
+  try { bus.emit('state:change', {}); } catch (_e) { /* chat re-evaluates visibility */ }
+}
+
 window.addEventListener('keydown', (e) => { if (active && e.key === 'Escape') hideGlobe(); });
 
 // ---------------------------------------------------------------------------
 // Camera helpers
 // ---------------------------------------------------------------------------
-function cameraHeight() {
-  try { return viewer.camera.positionCartographic.height; } catch (_e) { return Infinity; }
-}
-function isWholeGlobe() { return cameraHeight() > 3_000_000; }   // >3000 km ~ whole globe
+function cameraHeight() { try { return viewer.camera.positionCartographic.height; } catch (_e) { return Infinity; } }
+function isWholeGlobe() { return cameraHeight() > 3_000_000; }
 
-// Fly to a lat/lon with a Google-Earth oblique (~45°) framing on the point.
 function flyOblique(lat, lon, viewH) {
-  const H = viewH;
-  const dLat = H / 111320;                       // metres south -> degrees (tan45=1)
+  const dLat = viewH / 111320;
   viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(lon, lat - dLat, H),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
-    duration: 2.5
+    destination: Cesium.Cartesian3.fromDegrees(lon, lat - dLat, viewH),
+    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 }, duration: 2.5
   });
 }
 function flyTopDown(lat, lon, viewH, duration = 2.5) {
   viewer.camera.flyTo({
     destination: Cesium.Cartesian3.fromDegrees(lon, lat, viewH),
-    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 },
-    duration
+    orientation: { heading: 0, pitch: Cesium.Math.toRadians(-90), roll: 0 }, duration
   });
 }
-
-// Pick a view height from the place type (city vs street address).
 function heightForType(type) {
   if (/city|town|administrative|state|country/.test(String(type || ''))) return 9000;
   if (/suburb|neighbourhood|quarter|village/.test(String(type || ''))) return 3500;
-  return 700; // street / house / poi
+  return 700;
 }
 
 // ---------------------------------------------------------------------------
-// Satellites layer
+// Satellites
 // ---------------------------------------------------------------------------
 async function ensureCatalog() {
   if (satCatalog.length) return;
   histCatalog = historicCatalog();
-  try { satCatalog = await loadCatalog(); }
-  catch (e) { console.warn('[globe] catalog load failed', e); satCatalog = []; }
+  try { satCatalog = await loadCatalog(); } catch (e) { console.warn('[globe] catalog load failed', e); satCatalog = []; }
 }
 
 function satCartesian(entry, jsDate) {
   const now = Date.now();
   const cached = satCache.get(entry.id);
-  if (cached && now - cached.t < 1500) return cached.cart;   // throttle SGP4
+  if (cached && now - cached.t < 1500) return cached.cart;
   const geo = entry.reconstruction ? propagateHistoric(entry, jsDate) : propagate(entry, jsDate);
   if (!geo) return cached ? cached.cart : Cesium.Cartesian3.fromDegrees(0, 0, 0);
   const cart = Cesium.Cartesian3.fromDegrees(geo.lon, geo.lat, geo.altKm * 1000);
@@ -256,43 +295,46 @@ function satCartesian(entry, jsDate) {
   return cart;
 }
 
-async function showSatellites(force) {
-  if (!isWholeGlobe() && !force) {
-    return { ok: false, need_zoom_out: true,
-      message: 'Satelity widać tylko z widoku całego globu. Muszę się oddalić — zrobić to?' };
+function applySatFilter() {
+  for (const e of satEntities) {
+    const cat = e._satData ? e._satData.category : 'other';
+    e.show = satsOn && visibleCats.has(cat);
   }
-  if (!isWholeGlobe()) viewer.camera.flyHome(1.5);
-  await ensureCatalog();
-  if (satsOn) { renderLegend(); return { ok: true, count: satEntities.length }; }
-
-  const all = [...satCatalog, ...histCatalog];
-  for (const entry of all) {
-    const ent = viewer.entities.add({
-      position: new Cesium.CallbackProperty(() => satCartesian(entry, Cesium.JulianDate.toDate(viewer.clock.currentTime)), false),
-      point: {
-        pixelSize: entry.reconstruction ? 6 : 4,
-        color: Cesium.Color.fromCssColorString(entry.color),
-        outlineColor: Cesium.Color.BLACK.withAlpha(0.4), outlineWidth: 1,
-        scaleByDistance: new Cesium.NearFarScalar(1.5e6, 1.4, 4.0e7, 0.5)
-      }
-    });
-    ent._satData = entry;
-    satEntities.push(ent);
-  }
-  satsOn = true;
-  renderLegend();
-  return { ok: true, count: satEntities.length };
+  if (layer) { const f = layer.querySelector('#globe-sats .gl-filters'); if (f) f.hidden = !satsOn; }
 }
 
-function hideSatellites() {
-  for (const e of satEntities) { try { viewer.entities.remove(e); } catch (_e) { /* ignore */ } }
-  satEntities = []; satsOn = false;
-  renderLegend();
-  return { ok: true };
+async function setSatellites(on) {
+  if (on) {
+    if (!isWholeGlobe()) viewer.camera.flyHome(1.2);   // sats only make sense from orbit-out
+    await ensureCatalog();
+    if (!satEntities.length) {
+      const all = [...satCatalog, ...histCatalog];
+      for (const entry of all) {
+        const ent = viewer.entities.add({
+          position: new Cesium.CallbackProperty(() => satCartesian(entry, Cesium.JulianDate.toDate(viewer.clock.currentTime)), false),
+          point: {
+            pixelSize: entry.reconstruction ? 11 : 9,              // bigger dots (Jurek #2)
+            color: Cesium.Color.fromCssColorString(entry.color),
+            outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1,
+            scaleByDistance: new Cesium.NearFarScalar(8.0e5, 1.7, 6.0e7, 0.9),   // stay visible from far
+            disableDepthTestDistance: 0
+          }
+        });
+        ent._satData = entry;
+        satEntities.push(ent);
+      }
+    }
+    satsOn = true;
+  } else {
+    satsOn = false;
+  }
+  applySatFilter();
+  renderSatsSection();
+  return { ok: true, on: satsOn, count: satEntities.length, visible_types: [...visibleCats] };
 }
 
 // ---------------------------------------------------------------------------
-// Satellite detail panel (name + Wikipedia + real data + 3D model)
+// Satellite detail panel
 // ---------------------------------------------------------------------------
 let disposeModel = null;
 async function openSatPanel(entry) {
@@ -309,26 +351,16 @@ async function openSatPanel(entry) {
     '<div class="gl-panel-data" id="gl-data"></div>';
   panel.querySelector('.gl-panel-close').addEventListener('click', closeSatPanel);
 
-  // Real orbital data (live sats only).
   const dataEl = panel.querySelector('#gl-data');
   if (!entry.reconstruction) {
     const geo = propagate(entry, new Date());
-    if (geo) {
-      dataEl.innerHTML =
-        `<div><b>NORAD</b> ${escapeHTML(entry.id)}</div>` +
-        `<div><b>Wysokość</b> ${Math.round(geo.altKm)} km</div>` +
-        `<div><b>Pozycja</b> ${geo.lat.toFixed(1)}°, ${geo.lon.toFixed(1)}°</div>`;
-    }
-  } else {
-    dataEl.innerHTML = '<div><i>Orbita rekonstrukcyjna (przybliżona)</i></div>';
-  }
+    if (geo) dataEl.innerHTML = `<div><b>NORAD</b> ${escapeHTML(entry.id)}</div><div><b>Wysokość</b> ${Math.round(geo.altKm)} km</div><div><b>Pozycja</b> ${geo.lat.toFixed(1)}°, ${geo.lon.toFixed(1)}°</div>`;
+  } else { dataEl.innerHTML = '<div><i>Orbita rekonstrukcyjna (przybliżona)</i></div>'; }
 
-  // 3D model.
   if (disposeModel) { try { disposeModel(); } catch (_e) {} disposeModel = null; }
   try { disposeModel = await mountSatModel(panel.querySelector('#gl-model'), { variant: entry.category }); }
-  catch (e) { panel.querySelector('#gl-model').textContent = '(model 3D niedostępny)'; }
+  catch (_e) { panel.querySelector('#gl-model').textContent = '(model 3D niedostępny)'; }
 
-  // Wikipedia description (skip if we already showed a reconstruction note).
   if (!(entry.reconstruction && meta.note)) {
     const sum = await describeSatellite(wikiTitle);
     const descEl = panel.querySelector('#gl-desc');
@@ -341,10 +373,6 @@ function closeSatPanel() {
   if (disposeModel) { try { disposeModel(); } catch (_e) {} disposeModel = null; }
 }
 
-function escapeHTML(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
 // ---------------------------------------------------------------------------
 // ISS
 // ---------------------------------------------------------------------------
@@ -352,28 +380,23 @@ async function showISS(withVideo) {
   await ensureCatalog();
   const iss = findISS(satCatalog);
   if (!iss) return { ok: false, error: 'Nie znalazłem ISS w katalogu (CelesTrak offline?).' };
-  if (!satsOn) {
-    // add just the ISS entity if satellites aren't all shown
-    if (!issEntity) {
-      issEntity = viewer.entities.add({
-        position: new Cesium.CallbackProperty(() => satCartesian(iss, Cesium.JulianDate.toDate(viewer.clock.currentTime)), false),
-        point: { pixelSize: 9, color: Cesium.Color.fromCssColorString(CATEGORIES.stations.color), outlineColor: Cesium.Color.WHITE, outlineWidth: 1 },
-        label: { text: 'ISS', font: '12px monospace', pixelOffset: new Cesium.Cartesian2(0, -16), fillColor: Cesium.Color.WHITE }
-      });
-      issEntity._satData = iss;
-    }
+  if (!issEntity && !satsOn) {
+    issEntity = viewer.entities.add({
+      position: new Cesium.CallbackProperty(() => satCartesian(iss, Cesium.JulianDate.toDate(viewer.clock.currentTime)), false),
+      point: { pixelSize: 12, color: Cesium.Color.fromCssColorString(CATEGORIES.stations.color), outlineColor: Cesium.Color.WHITE, outlineWidth: 1 },
+      label: { text: 'ISS', font: '12px monospace', pixelOffset: new Cesium.Cartesian2(0, -18), fillColor: Cesium.Color.WHITE }
+    });
+    issEntity._satData = iss;
   }
   const geo = propagate(iss, new Date());
   if (geo) flyTopDown(geo.lat, geo.lon, 6_000_000, 2.5);
   if (withVideo) openVideo(NASA_ISS_VIDEO, 'ISS — LIVE (NASA)');
   return { ok: true, position: geo ? { lat: +geo.lat.toFixed(2), lon: +geo.lon.toFixed(2), altKm: Math.round(geo.altKm) } : null, video: !!withVideo };
 }
-
 function openVideo(src, title) {
   const v = layer.querySelector('#globe-video');
   v.hidden = false;
-  v.innerHTML = `<button class="gl-video-close">✕</button><div class="gl-video-title">${escapeHTML(title)}</div>` +
-    `<iframe src="${src}" allow="autoplay; encrypted-media" allowfullscreen frameborder="0"></iframe>`;
+  v.innerHTML = `<button class="gl-video-close">✕</button><div class="gl-video-title">${escapeHTML(title)}</div><iframe src="${src}" allow="autoplay; encrypted-media" allowfullscreen frameborder="0"></iframe>`;
   v.querySelector('.gl-video-close').addEventListener('click', () => { v.hidden = true; v.innerHTML = ''; });
 }
 
@@ -388,18 +411,32 @@ function showDzialka() {
 }
 
 // ---------------------------------------------------------------------------
-// Planes (OpenSky, free) — within the current view bounds.
+// Planes (OpenSky via bridge /proxy). Commercial vs military (approx heuristic).
 // ---------------------------------------------------------------------------
+const MIL_CALLSIGN = /^(RCH|REACH|RRR|ASCOT|CFC|IAM|CTM|GAF|NAF|BAF|FAF|HAF|PLF|POLICE|RESCUE|NATO|MMF|DUKE|SLAM|VV|VM|LOBO|GRZLY|HOBO)/i;
+function isMilitary(icao24, callsign) {
+  const cs = String(callsign || '').trim().toUpperCase();
+  if (cs && MIL_CALLSIGN.test(cs)) return true;
+  const hex = parseInt(String(icao24 || ''), 16);
+  if (Number.isFinite(hex) && hex >= 0xADF7C8 && hex <= 0xAFFFFF) return true; // US mil block
+  return false;
+}
+function applyPlaneFilter() {
+  let shown = 0;
+  for (const [, ent] of planeEntities) {
+    const show = ent._mil ? planeFilter.military : planeFilter.commercial;
+    ent.show = show;
+    if (show) shown++;
+  }
+  planeCount = shown;
+  updatePlanesCountUI();
+}
 async function pollPlanes() {
   if (!active || !planesOn) return;
-  let rect;
-  try { rect = viewer.camera.computeViewRectangle(); } catch (_e) { rect = null; }
+  let rect; try { rect = viewer.camera.computeViewRectangle(); } catch (_e) { rect = null; }
   if (!rect) return;
-  const q = 'lamin=' + Cesium.Math.toDegrees(rect.south).toFixed(3) +
-    '&lomin=' + Cesium.Math.toDegrees(rect.west).toFixed(3) +
-    '&lamax=' + Cesium.Math.toDegrees(rect.north).toFixed(3) +
-    '&lomax=' + Cesium.Math.toDegrees(rect.east).toFixed(3);
-  // OpenSky sends no CORS headers -> route through the bridge /proxy (local only).
+  const q = 'lamin=' + Cesium.Math.toDegrees(rect.south).toFixed(3) + '&lomin=' + Cesium.Math.toDegrees(rect.west).toFixed(3) +
+    '&lamax=' + Cesium.Math.toDegrees(rect.north).toFixed(3) + '&lomax=' + Cesium.Math.toDegrees(rect.east).toFixed(3);
   const target = 'https://opensky-network.org/api/states/all?' + q;
   const base = ((CONFIG.bridge && CONFIG.bridge.url) || '').replace(/\/$/, '');
   const url = base ? base + '/proxy?url=' + encodeURIComponent(target) : target;
@@ -409,35 +446,41 @@ async function pollPlanes() {
     const text = await res.text();
     if (text.includes('gz-proxy-error')) return;
     let data; try { data = JSON.parse(text); } catch (_e) { return; }
-    const states = Array.isArray(data.states) ? data.states.slice(0, 400) : [];
+    const states = Array.isArray(data.states) ? data.states.slice(0, 500) : [];
     const seen = new Set();
+    let mil = 0;
     for (const s of states) {
       const icao = s[0]; const lon = s[5]; const lat = s[6]; const alt = s[7] || s[13] || 0;
       if (lon == null || lat == null) continue;
       seen.add(icao);
       const cart = Cesium.Cartesian3.fromDegrees(lon, lat, (alt || 0) + 200);
+      const m = isMilitary(icao, s[1]);
+      if (m) mil++;
       let ent = planeEntities.get(icao);
       if (!ent) {
-        ent = viewer.entities.add({ position: cart, point: { pixelSize: 4, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1 } });
+        ent = viewer.entities.add({ position: cart, point: { pixelSize: 5, color: m ? Cesium.Color.fromCssColorString('#ff6a3d') : Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1 } });
+        ent._mil = m;
         planeEntities.set(icao, ent);
-      } else { ent.position = cart; }
+      } else { ent.position = cart; ent._mil = m; }
     }
-    for (const [icao, ent] of planeEntities) {
-      if (!seen.has(icao)) { try { viewer.entities.remove(ent); } catch (_e) {} planeEntities.delete(icao); }
-    }
-  } catch (_e) { /* rate-limited / offline — silent */ }
+    for (const [icao, ent] of planeEntities) { if (!seen.has(icao)) { try { viewer.entities.remove(ent); } catch (_e) {} planeEntities.delete(icao); } }
+    planeMil = mil;
+    applyPlaneFilter();
+  } catch (_e) { /* rate-limited / offline */ }
 }
-function startPlanes() {
-  if (planesOn) return;
-  planesOn = true;
-  pollPlanes();
-  planeTimer = setInterval(pollPlanes, 13000);
+function setPlanes(on) {
+  if (on) {
+    if (planesOn) { renderPlanesSection(); return { ok: true, on: true, count: planeCount }; }
+    planesOn = true; pollPlanes(); planeTimer = setInterval(pollPlanes, 13000);
+  } else { stopPlanes(); }
+  renderPlanesSection();
+  return { ok: true, on: planesOn, count: planeCount };
 }
 function stopPlanes() {
   planesOn = false;
   if (planeTimer) { clearInterval(planeTimer); planeTimer = 0; }
   for (const [, ent] of planeEntities) { try { viewer && viewer.entities.remove(ent); } catch (_e) {} }
-  planeEntities = new Map();
+  planeEntities = new Map(); planeCount = 0; planeMil = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -448,48 +491,25 @@ function needGlobe() { return active ? null : { ok: false, error: 'Najpierw otw�
 
 export async function init() {
   toolRouter.registerTool(
-    { name: 'show_globe', description: 'Włącza TRYB GLOBUS: awatar zamienia się w interaktywny, fotorealistyczny globus (Google-Earth-owy) na całym ekranie — można nim obracać/zoomować myszą i głosem. Widgety chowają się. Użyj na „pokaż glob/globus/Ziemię".', parameters: EMPTY },
+    { name: 'show_globe', description: 'Włącza TRYB GLOBUS: awatar zamienia się w interaktywny globus (Ziemia w czarnej pustce) na całym ekranie — obracasz/zoomujesz myszą i głosem. Widgety chowają się, czat zostaje. „pokaż glob/globus/Ziemię".', parameters: EMPTY },
     async () => showGlobe()
   );
   toolRouter.registerTool(
-    { name: 'hide_globe', description: 'Wyłącza tryb globu i wraca do awatara (widgety wracają). „schowaj glob".', parameters: EMPTY },
+    { name: 'hide_globe', description: 'Wyłącza tryb globu i wraca do awatara. „schowaj glob".', parameters: EMPTY },
     async () => hideGlobe()
   );
 
   toolRouter.registerTool(
-    {
-      name: 'globe_fly_to',
-      description: 'Leci globem do miejsca i pokazuje je pod kątem ~45° (jak Google Earth). Przyjmuje miasta, dzielnice i ADRESY z numerem („Warszawa", „Mokotów", „Tyniecka 31"). Działa też do doprecyzowania z aktualnego widoku.',
-      parameters: { type: 'object', properties: { place: { type: 'string', description: 'Nazwa miejsca lub adres.' } }, required: ['place'] }
-    },
-    async ({ place }) => {
-      const g = needGlobe(); if (g) return g;
-      const loc = await geocode(place);
-      if (!loc) return { ok: false, error: 'Nie znalazłem miejsca „' + String(place || '').trim() + '".' };
-      flyOblique(loc.lat, loc.lon, heightForType(loc.type));
-      return { ok: true, place: loc.name, lat: +loc.lat.toFixed(4), lon: +loc.lon.toFixed(4) };
-    }
+    { name: 'globe_fly_to', description: 'Leci globem do miejsca pod kątem ~45° (jak Google Earth). Miasta, dzielnice, ADRESY z numerem („Warszawa", „Mokotów", „Tyniecka 31"). Działa też do doprecyzowania z aktualnego widoku.', parameters: { type: 'object', properties: { place: { type: 'string', description: 'Nazwa miejsca lub adres.' } }, required: ['place'] } },
+    async ({ place }) => { const g = needGlobe(); if (g) return g; const loc = await geocode(place); if (!loc) return { ok: false, error: 'Nie znalazłem miejsca „' + String(place || '').trim() + '".' }; flyOblique(loc.lat, loc.lon, heightForType(loc.type)); return { ok: true, place: loc.name, lat: +loc.lat.toFixed(4), lon: +loc.lon.toFixed(4) }; }
   );
 
   toolRouter.registerTool(
-    {
-      name: 'globe_camera',
-      description: 'Steruje kamerą globu głosem. action: orbit_left/orbit_right/orbit_up/orbit_down/zoom_in/zoom_out/tilt. amount: „trochę"/„średnio"/„bardzo".',
-      parameters: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', description: 'orbit_left|orbit_right|orbit_up|orbit_down|zoom_in|zoom_out|tilt' },
-          amount: { type: 'string', description: 'trochę | średnio | bardzo' }
-        },
-        required: ['action']
-      }
-    },
+    { name: 'globe_camera', description: 'Steruje kamerą globu głosem. action: orbit_left/orbit_right/orbit_up/orbit_down/zoom_in/zoom_out/tilt. amount: „trochę"/„średnio"/„bardzo".', parameters: { type: 'object', properties: { action: { type: 'string', description: 'orbit_left|orbit_right|orbit_up|orbit_down|zoom_in|zoom_out|tilt' }, amount: { type: 'string', description: 'trochę | średnio | bardzo' } }, required: ['action'] } },
     async ({ action, amount }) => {
       const g = needGlobe(); if (g) return g;
       const a = { 'trochę': 1, 'troche': 1, 'średnio': 2, 'srednio': 2, 'bardzo': 3.5 }[String(amount || 'średnio').toLowerCase()] || 2;
-      const cam = viewer.camera;
-      const rad = Cesium.Math.toRadians(12 * a);
-      const dist = cameraHeight();
+      const cam = viewer.camera; const rad = Cesium.Math.toRadians(12 * a); const dist = cameraHeight();
       try {
         switch (String(action)) {
           case 'orbit_left': cam.rotateRight(-rad); break;
@@ -502,6 +522,7 @@ export async function init() {
           default: return { ok: false, error: 'nieznana akcja: ' + action };
         }
       } catch (e) { return { ok: false, error: String(e.message || e) }; }
+      updateHudVisibility();
       return { ok: true, action, amount: amount || 'średnio' };
     }
   );
@@ -509,38 +530,33 @@ export async function init() {
   toolRouter.registerTool(
     {
       name: 'globe_satellites',
-      description: 'Włącza/wyłącza warstwę SATELIT na globie (kolorowe kropki wg typu: Starlink, GNSS, pogodowe, teleskopy, stacje, historyczne). Satelity widać TYLKO z widoku całego globu — gdy jesteś w mieście, narzędzie zwróci need_zoom_out:true (zapytaj Jurka „oddalić się?" i wywołaj ponownie z confirm_zoom_out:true).',
-      parameters: {
-        type: 'object',
-        properties: {
-          on: { type: 'boolean', description: 'true = pokaż, false = schowaj.' },
-          confirm_zoom_out: { type: 'boolean', description: 'true = zgoda Jurka na oddalenie do widoku globu.' }
-        },
-        required: ['on']
-      }
+      description: 'Sekcja SATELITY (lewy dół): włącz/wyłącz warstwę i USTAW które TYPY widać (filtry). ' +
+        'on: true/false. types: lista typów do pokazania — stations, starlink, gnss, weather, science, geo, historic, other (albo „all"/„none"). ' +
+        'Satelity widać tylko z widoku całego globu; przy włączaniu z bliska sam oddalę kamerę. Kropki są kolorowane wg typu.',
+      parameters: { type: 'object', properties: { on: { type: 'boolean' }, types: { type: 'array', items: { type: 'string' }, description: 'Typy do pokazania lub ["all"]/["none"].' } }, required: [] }
     },
-    async ({ on, confirm_zoom_out }) => {
+    async ({ on, types }) => {
       const g = needGlobe(); if (g) return g;
-      if (on === false) return hideSatellites();
-      return showSatellites(!!confirm_zoom_out);
+      if (Array.isArray(types)) {
+        const keys = Object.keys(CATEGORIES);
+        visibleCats.clear();
+        if (types.length === 1 && types[0] === 'all') keys.forEach((k) => visibleCats.add(k));
+        else if (types.length === 1 && types[0] === 'none') { /* leave empty */ }
+        else types.map((t) => String(t).toLowerCase()).filter((t) => keys.includes(t)).forEach((t) => visibleCats.add(t));
+      }
+      const res = await setSatellites(on === undefined ? (satsOn || true) : !!on);
+      if (Array.isArray(types)) { applySatFilter(); renderSatsSection(); }
+      return { ...res, visible_types: [...visibleCats] };
     }
   );
 
   toolRouter.registerTool(
-    {
-      name: 'globe_show_satellite',
-      description: 'Otwiera panel wybranej satelity (Nazwa, Opis z Wikipedii, model 3D do obracania, dane orbity). Podaj nazwę („Hubble", „ISS", „Sputnik", „Starlink"). Można też kliknąć kropkę na globie.',
-      parameters: { type: 'object', properties: { name: { type: 'string', description: 'Nazwa satelity.' } }, required: ['name'] }
-    },
+    { name: 'globe_show_satellite', description: 'Otwiera panel satelity (Nazwa, opis z Wikipedii, model 3D do obracania, dane orbity). Nazwa: „Hubble", „ISS", „Sputnik", „Starlink". Można też kliknąć kropkę.', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
     async ({ name }) => {
       const g = needGlobe(); if (g) return g;
       await ensureCatalog();
       let entry = searchByName(satCatalog, histCatalog, name);
-      // fall back to a historic museum entry by fuzzy name
-      if (!entry) {
-        const h = HISTORIC.find((x) => x.name.toLowerCase().includes(String(name || '').toLowerCase()));
-        if (h) entry = { id: 'museum', name: h.name, category: 'historic', color: CATEGORIES.historic.color, reconstruction: true, meta: h };
-      }
+      if (!entry) { const h = HISTORIC.find((x) => x.name.toLowerCase().includes(String(name || '').toLowerCase())); if (h) entry = { id: 'museum', name: h.name, category: 'historic', color: CATEGORIES.historic.color, reconstruction: true, meta: h }; }
       if (!entry) return { ok: false, error: 'Nie mam satelity „' + String(name || '').trim() + '" w katalogu.' };
       await openSatPanel(entry);
       return { ok: true, satellite: entry.name };
@@ -548,31 +564,39 @@ export async function init() {
   );
 
   toolRouter.registerTool(
-    {
-      name: 'globe_iss',
-      description: 'Pokazuje Międzynarodową Stację Kosmiczną: leci do jej aktualnej pozycji na globie; z video:true otwiera darmowy live-stream NASA z ISS.',
-      parameters: { type: 'object', properties: { video: { type: 'boolean', description: 'true = otwórz live wideo NASA.' } }, required: [] }
-    },
+    { name: 'globe_iss', description: 'Pokazuje ISS: leci do jej pozycji; z video:true otwiera darmowy live-stream NASA.', parameters: { type: 'object', properties: { video: { type: 'boolean' } }, required: [] } },
     async ({ video }) => { const g = needGlobe(); if (g) return g; return showISS(!!video); }
   );
 
   toolRouter.registerTool(
-    { name: 'globe_dzialka', description: 'Pokazuje działkę w Gzowie z góry (statyczne zdjęcie lotnicze — NIE live). „pokaż działkę/Gzowo z góry".', parameters: EMPTY },
+    { name: 'globe_dzialka', description: 'Pokazuje działkę w Gzowie z góry (statyczne zdjęcie — NIE live).', parameters: EMPTY },
     async () => { const g = needGlobe(); if (g) return g; return showDzialka(); }
   );
 
   toolRouter.registerTool(
     {
       name: 'globe_planes',
-      description: 'Włącza/wyłącza live SAMOLOTY nad globem (OpenSky, darmowe) — w granicach aktualnego widoku.',
-      parameters: { type: 'object', properties: { on: { type: 'boolean', description: 'true = pokaż, false = schowaj.' } }, required: ['on'] }
+      description: 'Sekcja SAMOLOTY (prawy dół): włącz/wyłącz live samoloty (OpenSky, w granicach widoku) + filtr komercyjne/wojskowe. ' +
+        'on: true/false. types: ["commercial"], ["military"] albo oba. Wojskowe są PRZYBLIŻONE (heurystyka callsign/hex — darmowo nie ma pewnego źródła). Zwraca liczbę w powietrzu.',
+      parameters: { type: 'object', properties: { on: { type: 'boolean' }, types: { type: 'array', items: { type: 'string' }, description: 'commercial | military (oba = pokaż wszystkie).' } }, required: [] }
     },
-    async ({ on }) => {
+    async ({ on, types }) => {
       const g = needGlobe(); if (g) return g;
-      if (on === false) { stopPlanes(); return { ok: true, planes: 'off' }; }
-      startPlanes();
-      return { ok: true, planes: 'on' };
+      if (Array.isArray(types)) { planeFilter.commercial = types.map((t) => String(t).toLowerCase()).includes('commercial'); planeFilter.military = types.map((t) => String(t).toLowerCase()).includes('military'); if (!planeFilter.commercial && !planeFilter.military) { planeFilter.commercial = planeFilter.military = true; } }
+      const res = setPlanes(on === undefined ? (planesOn || true) : !!on);
+      if (Array.isArray(types)) { applyPlaneFilter(); renderPlanesSection(); }
+      return { ...res, in_air: planeCount, military_approx: planeMil, types: { commercial: planeFilter.commercial, military: planeFilter.military } };
     }
+  );
+
+  toolRouter.registerTool(
+    { name: 'globe_status', description: 'Zwraca aktualny stan trybu globu: czy otwarty, wysokość/widok kamery, stan sekcji SATELITY (on + widoczne typy) i SAMOLOTY (on + liczba w powietrzu + filtry). Użyj, gdy Jurek pyta „co jest włączone na globie".', parameters: EMPTY },
+    async () => ({
+      ok: true, open: active,
+      view: active ? (isWholeGlobe() ? 'caly-glob' : 'zblizenie') : null,
+      satellites: { on: satsOn, visible_types: [...visibleCats], loaded: satEntities.length },
+      planes: { on: planesOn, in_air: planeCount, military_approx: planeMil, commercial: planeFilter.commercial, military: planeFilter.military }
+    })
   );
 
   console.info('[globe] ready — spatial tools registered');
