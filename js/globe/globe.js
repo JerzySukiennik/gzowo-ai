@@ -170,6 +170,7 @@ async function showGlobe() {
     contextOptions: { webgl: { powerPreference: 'high-performance' } }
   });
   viewer.cesiumWidget.creditContainer.style.display = 'none';
+  viewer.clock.shouldAnimate = true;            // keep the clock ticking (real-time motion)
   viewer.scene.globe.maximumScreenSpaceError = 2.2;
   viewer.resolutionScale = (window.devicePixelRatio || 1) >= 2 ? 0.85 : 1;
 
@@ -287,7 +288,7 @@ async function ensureCatalog() {
 function satCartesian(entry, jsDate) {
   const now = Date.now();
   const cached = satCache.get(entry.id);
-  if (cached && now - cached.t < 1500) return cached.cart;
+  if (cached && now - cached.t < 300) return cached.cart;   // recompute ~3×/s so dots glide
   const geo = entry.reconstruction ? propagateHistoric(entry, jsDate) : propagate(entry, jsDate);
   if (!geo) return cached ? cached.cart : Cesium.Cartesian3.fromDegrees(0, 0, 0);
   const cart = Cesium.Cartesian3.fromDegrees(geo.lon, geo.lat, geo.altKm * 1000);
@@ -311,7 +312,7 @@ async function setSatellites(on) {
       const all = [...satCatalog, ...histCatalog];
       for (const entry of all) {
         const ent = viewer.entities.add({
-          position: new Cesium.CallbackProperty(() => satCartesian(entry, Cesium.JulianDate.toDate(viewer.clock.currentTime)), false),
+          position: new Cesium.CallbackProperty(() => satCartesian(entry, new Date()), false),
           point: {
             pixelSize: entry.reconstruction ? 11 : 9,              // bigger dots (Jurek #2)
             color: Cesium.Color.fromCssColorString(entry.color),
@@ -382,7 +383,7 @@ async function showISS(withVideo) {
   if (!iss) return { ok: false, error: 'Nie znalazłem ISS w katalogu (CelesTrak offline?).' };
   if (!issEntity && !satsOn) {
     issEntity = viewer.entities.add({
-      position: new Cesium.CallbackProperty(() => satCartesian(iss, Cesium.JulianDate.toDate(viewer.clock.currentTime)), false),
+      position: new Cesium.CallbackProperty(() => satCartesian(iss, new Date()), false),
       point: { pixelSize: 12, color: Cesium.Color.fromCssColorString(CATEGORIES.stations.color), outlineColor: Cesium.Color.WHITE, outlineWidth: 1 },
       label: { text: 'ISS', font: '12px monospace', pixelOffset: new Cesium.Cartesian2(0, -18), fillColor: Cesium.Color.WHITE }
     });
@@ -421,6 +422,23 @@ function isMilitary(icao24, callsign) {
   if (Number.isFinite(hex) && hex >= 0xADF7C8 && hex <= 0xAFFFFF) return true; // US mil block
   return false;
 }
+// Move a lat/lon by distance (m) along a bearing (deg) — for plane extrapolation.
+function moveLatLon(lat, lon, distM, bearingDeg) {
+  const R = 6378137;
+  const br = bearingDeg * Math.PI / 180, la1 = lat * Math.PI / 180, lo1 = lon * Math.PI / 180;
+  const dR = distM / R;
+  const la2 = Math.asin(Math.sin(la1) * Math.cos(dR) + Math.cos(la1) * Math.sin(dR) * Math.cos(br));
+  const lo2 = lo1 + Math.atan2(Math.sin(br) * Math.sin(dR) * Math.cos(la1), Math.cos(dR) - Math.sin(la1) * Math.sin(la2));
+  return { lat: la2 * 180 / Math.PI, lon: ((lo2 * 180 / Math.PI + 540) % 360) - 180 };
+}
+// Dead-reckon a plane's current position from its last OpenSky sample.
+function planeCart(b) {
+  if (!b) return Cesium.Cartesian3.fromDegrees(0, 0, 0);
+  if (b.ground || !(b.vel > 0)) return Cesium.Cartesian3.fromDegrees(b.lon, b.lat, b.alt);
+  const el = Math.min(30, (Date.now() - b.t) / 1000);   // cap so stale planes don't drift off
+  const p = moveLatLon(b.lat, b.lon, b.vel * el, b.track);
+  return Cesium.Cartesian3.fromDegrees(p.lon, p.lat, b.alt);
+}
 function applyPlaneFilter() {
   let shown = 0;
   for (const [, ent] of planeEntities) {
@@ -453,15 +471,18 @@ async function pollPlanes() {
       const icao = s[0]; const lon = s[5]; const lat = s[6]; const alt = s[7] || s[13] || 0;
       if (lon == null || lat == null) continue;
       seen.add(icao);
-      const cart = Cesium.Cartesian3.fromDegrees(lon, lat, (alt || 0) + 200);
       const m = isMilitary(icao, s[1]);
       if (m) mil++;
+      const base = { lat, lon, alt: (alt || 0) + 200, vel: Number(s[9]) || 0, track: Number(s[10]) || 0, ground: !!s[8], t: Date.now() };
       let ent = planeEntities.get(icao);
       if (!ent) {
-        ent = viewer.entities.add({ position: cart, point: { pixelSize: 5, color: m ? Cesium.Color.fromCssColorString('#ff6a3d') : Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1 } });
-        ent._mil = m;
+        ent = viewer.entities.add({
+          position: new Cesium.CallbackProperty(() => planeCart(ent._base), false),
+          point: { pixelSize: 5, color: m ? Cesium.Color.fromCssColorString('#ff6a3d') : Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1 }
+        });
         planeEntities.set(icao, ent);
-      } else { ent.position = cart; ent._mil = m; }
+      }
+      ent._base = base; ent._mil = m;
     }
     for (const [icao, ent] of planeEntities) { if (!seen.has(icao)) { try { viewer.entities.remove(ent); } catch (_e) {} planeEntities.delete(icao); } }
     planeMil = mil;
