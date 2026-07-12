@@ -32,6 +32,29 @@ function parseTLE(text) {
 
 function noradOf(l1) { return l1.slice(2, 7).trim(); }
 
+// CelesTrak updates each group every 2h AND returns HTTP 403 ("GP data has not
+// updated since your last successful download…") if you re-fetch sooner. So cache
+// each group's TLE text in localStorage and reuse it within the window — this is
+// exactly the polite behaviour CelesTrak asks for, and it stops Starlink (the big,
+// most-hammered group) from silently coming back empty.
+const TLE_TTL_MS = 2 * 60 * 60 * 1000;
+async function fetchGroupTLE(group) {
+  const key = 'gz.tle.' + group;
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(key) || 'null'); } catch { cached = null; }
+  if (cached && cached.text && (Date.now() - cached.t) < TLE_TTL_MS) return cached.text;
+  try {
+    const res = await fetch(celestrakUrl(group), { cache: 'no-store' });
+    const text = await res.text();
+    const valid = res.ok && text.length > 50 && !/has not updated/i.test(text) && /\n1 /.test('\n' + text);
+    if (valid) {
+      try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), text })); } catch { /* quota */ }
+      return text;
+    }
+  } catch (_e) { /* fall back to cache */ }
+  return (cached && cached.text) || '';   // 403 / empty / offline -> last good copy
+}
+
 /**
  * Load the curated live catalog (~200 sats) from CelesTrak, per-category capped.
  * @returns {Promise<Array>} [{id, name, category, color, satrec}]
@@ -41,11 +64,7 @@ export async function loadCatalog() {
   const seen = new Set();
   const results = await Promise.all(SAT_GROUPS.map(async (g) => {
     const cat = CATEGORIES[g.category] || CATEGORIES.other;
-    let text = '';
-    try {
-      const res = await fetch(celestrakUrl(g.group), { cache: 'no-store' });
-      if (res.ok) text = await res.text();
-    } catch (_e) { /* group offline — skip */ }
+    const text = await fetchGroupTLE(g.group);   // cached, 403-resilient
     const triples = parseTLE(text).slice(0, cat.cap);
     const list = [];
     for (const t of triples) {

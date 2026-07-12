@@ -228,6 +228,7 @@ async function showGlobe() {
 
 function hideGlobe() {
   if (!active) return { ok: false, error: 'glob nie jest otwarty' };
+  if (panelTimer) { clearInterval(panelTimer); panelTimer = 0; }
   stopPlanes();
   allowChatOnGlobe(false);
   try { viewer && viewer.destroy(); } catch (_e) { /* ignore */ }
@@ -318,7 +319,9 @@ async function setSatellites(on) {
             color: Cesium.Color.fromCssColorString(entry.color),
             outlineColor: Cesium.Color.BLACK.withAlpha(0.5), outlineWidth: 1,
             scaleByDistance: new Cesium.NearFarScalar(8.0e5, 1.7, 6.0e7, 0.9),   // stay visible from far
-            disableDepthTestDistance: 0
+            // Draw ALL sats on top — low-orbit ones (Starlink) hug the surface and
+            // otherwise get depth-culled / z-fought into invisibility.
+            disableDepthTestDistance: Number.POSITIVE_INFINITY
           }
         });
         ent._satData = entry;
@@ -338,6 +341,25 @@ async function setSatellites(on) {
 // Satellite detail panel
 // ---------------------------------------------------------------------------
 let disposeModel = null;
+let panelTimer = 0;
+// Rough orbital speed (circular) from altitude — km/s. GM_earth = 398600 km^3/s^2.
+function orbitalSpeed(altKm) { return Math.sqrt(398600 / (6378.137 + Math.max(0, altKm))); }
+
+// Live position/data block, refreshed every second while the panel is open.
+function refreshPanelData(entry) {
+  const el = layer && layer.querySelector('#gl-data');
+  if (!el) return;
+  const geo = entry.reconstruction ? propagateHistoric(entry, new Date()) : propagate(entry, new Date());
+  if (!geo) { el.innerHTML = '<div><i>Brak danych pozycji</i></div>'; return; }
+  el.innerHTML =
+    (entry.reconstruction
+      ? '<div><i>Orbita rekonstrukcyjna (przybliżona)</i></div>'
+      : `<div><b>NORAD</b> ${escapeHTML(entry.id)}</div>`) +
+    `<div><b>Wysokość</b> ${Math.round(geo.altKm)} km</div>` +
+    `<div><b>Pozycja</b> ${geo.lat.toFixed(2)}°, ${geo.lon.toFixed(2)}°</div>` +
+    `<div><b>Prędkość</b> ~${orbitalSpeed(geo.altKm).toFixed(2)} km/s</div>`;
+}
+
 async function openSatPanel(entry) {
   const panel = layer.querySelector('#globe-panel');
   panel.hidden = false;
@@ -352,11 +374,9 @@ async function openSatPanel(entry) {
     '<div class="gl-panel-data" id="gl-data"></div>';
   panel.querySelector('.gl-panel-close').addEventListener('click', closeSatPanel);
 
-  const dataEl = panel.querySelector('#gl-data');
-  if (!entry.reconstruction) {
-    const geo = propagate(entry, new Date());
-    if (geo) dataEl.innerHTML = `<div><b>NORAD</b> ${escapeHTML(entry.id)}</div><div><b>Wysokość</b> ${Math.round(geo.altKm)} km</div><div><b>Pozycja</b> ${geo.lat.toFixed(1)}°, ${geo.lon.toFixed(1)}°</div>`;
-  } else { dataEl.innerHTML = '<div><i>Orbita rekonstrukcyjna (przybliżona)</i></div>'; }
+  if (panelTimer) { clearInterval(panelTimer); panelTimer = 0; }
+  refreshPanelData(entry);
+  panelTimer = setInterval(() => refreshPanelData(entry), 1000);   // live position
 
   if (disposeModel) { try { disposeModel(); } catch (_e) {} disposeModel = null; }
   try { disposeModel = await mountSatModel(panel.querySelector('#gl-model'), { variant: entry.category }); }
@@ -369,6 +389,7 @@ async function openSatPanel(entry) {
   }
 }
 function closeSatPanel() {
+  if (panelTimer) { clearInterval(panelTimer); panelTimer = 0; }
   const panel = layer && layer.querySelector('#globe-panel');
   if (panel) { panel.hidden = true; panel.innerHTML = ''; }
   if (disposeModel) { try { disposeModel(); } catch (_e) {} disposeModel = null; }
