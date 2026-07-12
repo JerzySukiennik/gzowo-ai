@@ -79,6 +79,14 @@ async function ionToken() {
   return '';
 }
 
+async function google3dKey() {
+  const base = ((CONFIG.bridge && CONFIG.bridge.url) || '').replace(/\/$/, '');
+  if (!base) return '';
+  try { const r = await fetch(base + '/google3d-key'); if (r.ok) { const d = await r.json(); return d.key || ''; } }
+  catch (_e) { /* no bridge */ }
+  return '';
+}
+
 function escapeHTML(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -163,7 +171,7 @@ async function showGlobe() {
   document.body.dataset.globe = 'on';
   active = true;
 
-  const gkey = (CONFIG.google3d && CONFIG.google3d.key) || '';
+  const gkey = await google3dKey();
   const ionTok = gkey ? '' : await ionToken();
   if (ionTok) { try { Cesium.Ion.defaultAccessToken = ionTok; } catch (_e) { /* ignore */ } }
 
