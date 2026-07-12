@@ -63,7 +63,7 @@ export const CONFIG = {
   //     google3d.key upgrades to Google Photorealistic 3D Tiles (buildings) —
   //     needs a Google Maps Platform key with Map Tiles API + billing. PUBLIC-SAFE
   //     but MUST be HTTP-referrer restricted + quota-capped. Empty = free Esri base.
-  google3d: { key: 'AIzaSyD4pap3iLH1hewMUDJpcCLQ3PpG3TVaUJ8' },
+  google3d: { key: '' },
   // Cesium ion token for terrain + OSM 3D buildings + imagery (free, no card).
   // Kept EMPTY here (public repo): the real token lives in bridge/.env and is
   // served locally via /cesium-token. Fill this only if you want ion on Pages too
