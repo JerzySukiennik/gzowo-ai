@@ -212,12 +212,17 @@ async function showGlobe() {
   // 3D layer.
   if (gkey) {
     try {
+      // Cesium 1.123: first arg is the API key STRING (passing {key} sends
+      // "[object Object]" as the key -> 400 API_KEY_INVALID).
       if (Cesium.GoogleMaps) Cesium.GoogleMaps.defaultApiKey = gkey;
-      const tilesetOpts = Cesium.GoogleMaps ? {} : { key: gkey };
-      viewer.scene.primitives.add(await Cesium.createGooglePhotorealistic3DTileset(tilesetOpts));
+      viewer.scene.primitives.add(await Cesium.createGooglePhotorealistic3DTileset(gkey));
       bus.emit('toast', { text: '🌍 Google 3D (fototekstury).', kind: 'info' });
     }
-    catch (e) { console.warn('[globe] Google 3D failed', e); bus.emit('toast', { text: 'Google 3D niedostępne — płaskie zdjęcia.', kind: 'warn' }); }
+    catch (e) {
+      const msg = e && (e.message || (e.response && e.response) || JSON.stringify(e));
+      console.error('[globe] Google 3D failed — full error:', msg, e);
+      bus.emit('toast', { text: 'Google 3D niedostępne — płaskie zdjęcia.', kind: 'warn' });
+    }
   } else if (ionTok) {
     // Free look: crisp Bing aerial on REAL 3D terrain (looks more "drone" than grey
     // boxes). OSM building blocks are OFF by default (they cheapen it) — toggle with
