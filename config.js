@@ -68,7 +68,7 @@ export const CONFIG = {
   // Kept EMPTY here (public repo): the real token lives in bridge/.env and is
   // served locally via /cesium-token. Fill this only if you want ion on Pages too
   // (then it's public — scope the token read-only to those assets in ion settings).
-  cesium: { ionToken: '' },
+  cesium: { ionToken: '', buildings: false },   // buildings=grey OSM 3D blocks (off by default)
   // Canonical Gzowo plot point (top-down "działka" view). 52°36'46.0"N 21°06'57.7"E.
   gzowo: { lat: 52.612778, lon: 21.116028, name: 'Gzowo — działka' }
 };

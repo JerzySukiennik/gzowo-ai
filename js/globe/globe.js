@@ -37,6 +37,11 @@ const visibleCats = new Set(Object.keys(CATEGORIES));   // all types shown by de
 let issEntity = null;
 const satCache = new Map();
 
+// 3D buildings (Cesium OSM) — off by default; toggled live.
+let osmBuildings = null;
+let buildingsOn = false;
+let ionReady = false;
+
 // Planes layer
 let planesOn = false;
 let planeTimer = 0;
@@ -201,9 +206,12 @@ async function showGlobe() {
     try { viewer.scene.primitives.add(await Cesium.createGooglePhotorealistic3DTileset({ key: gkey })); bus.emit('toast', { text: '🌍 Google 3D (fototekstury).', kind: 'info' }); }
     catch (e) { console.warn('[globe] Google 3D failed', e); bus.emit('toast', { text: 'Google 3D niedostępne — płaskie zdjęcia.', kind: 'warn' }); }
   } else if (ionTok) {
+    // Free look: crisp Bing aerial on REAL 3D terrain (looks more "drone" than grey
+    // boxes). OSM building blocks are OFF by default (they cheapen it) — toggle with
+    // globe_buildings / config.cesium.buildings.
     try { viewer.terrainProvider = await Cesium.createWorldTerrainAsync(); } catch (e) { console.warn('[globe] terrain failed', e); }
-    try { viewer.scene.primitives.add(await Cesium.createOsmBuildingsAsync()); bus.emit('toast', { text: '🌍 Cesium ion: teren + budynki 3D.', kind: 'info' }); }
-    catch (e) { console.warn('[globe] OSM buildings failed', e); }
+    ionReady = true;
+    if (CONFIG.cesium && CONFIG.cesium.buildings) await setBuildings(true);
   }
 
   viewer.screenSpaceEventHandler.setInputAction((click) => {
@@ -226,9 +234,27 @@ async function showGlobe() {
   return { ok: true };
 }
 
+// Toggle the grey OSM 3D building blocks (ion only). Off by default — imagery on
+// terrain reads more "drone-like"; blocks are there if Jurek wants volume.
+async function setBuildings(on) {
+  if (!ionReady) return { ok: false, error: 'Bryły 3D wymagają Cesium ion (lokalnie/most).' };
+  if (on) {
+    if (!osmBuildings) {
+      try { osmBuildings = viewer.scene.primitives.add(await Cesium.createOsmBuildingsAsync()); }
+      catch (e) { return { ok: false, error: 'nie udało się załadować budynków 3D' }; }
+    }
+    osmBuildings.show = true; buildingsOn = true;
+  } else {
+    if (osmBuildings) osmBuildings.show = false;
+    buildingsOn = false;
+  }
+  return { ok: true, buildings: buildingsOn };
+}
+
 function hideGlobe() {
   if (!active) return { ok: false, error: 'glob nie jest otwarty' };
   if (panelTimer) { clearInterval(panelTimer); panelTimer = 0; }
+  osmBuildings = null; buildingsOn = false; ionReady = false;
   stopPlanes();
   allowChatOnGlobe(false);
   try { viewer && viewer.destroy(); } catch (_e) { /* ignore */ }
@@ -613,6 +639,11 @@ export async function init() {
   toolRouter.registerTool(
     { name: 'globe_dzialka', description: 'Pokazuje działkę w Gzowie z góry (statyczne zdjęcie — NIE live).', parameters: EMPTY },
     async () => { const g = needGlobe(); if (g) return g; return showDzialka(); }
+  );
+
+  toolRouter.registerTool(
+    { name: 'globe_buildings', description: 'Włącza/wyłącza szare BRYŁY 3D budynków (Cesium OSM, bez tekstur). Domyślnie OFF — czyste zdjęcia satelitarne na terenie 3D wyglądają bardziej „z lotu drona". „pokaż/schowaj budynki 3D".', parameters: { type: 'object', properties: { on: { type: 'boolean' } }, required: ['on'] } },
+    async ({ on }) => { const g = needGlobe(); if (g) return g; return setBuildings(!!on); }
   );
 
   toolRouter.registerTool(
